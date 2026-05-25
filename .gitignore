@@ -1,0 +1,12 @@
+node_modules/
+dist/
+logs/
+.env
+.env.local
+
+backend/.env
+backend/node_modules/
+
+frontend/.env
+frontend/dist/
+frontend/node_modules/
