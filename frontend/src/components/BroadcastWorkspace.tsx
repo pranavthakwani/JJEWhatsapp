@@ -1,5 +1,6 @@
 import {
   AlertCircle,
+  ArrowLeft,
   Check,
   CheckCheck,
   Clock3,
@@ -17,6 +18,7 @@ import type { Campaign, CampaignRecipient, Contact, ContactList } from '../types
 
 type Props = {
   contactList: ContactList | null;
+  onBack?: () => void;
   onSendBroadcast: (contactList: ContactList, bodyText: string) => Promise<Campaign>;
   onContactListUpdated: (contactList: ContactList) => void;
 };
@@ -219,7 +221,7 @@ function DeliveryGroupsSkeleton() {
   );
 }
 
-export function BroadcastWorkspace({ contactList, onSendBroadcast, onContactListUpdated }: Props) {
+export function BroadcastWorkspace({ contactList, onBack, onSendBroadcast, onContactListUpdated }: Props) {
   const [draft, setDraft] = useState('');
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [optimisticItems, setOptimisticItems] = useState<OptimisticBroadcast[]>([]);
@@ -525,19 +527,24 @@ export function BroadcastWorkspace({ contactList, onSendBroadcast, onContactList
   return (
     <section className="chat-pane broadcast-chat-pane">
       <header className="chat-pane__header">
-        <button type="button" className="chat-pane__contact broadcast-header-button" onClick={() => setMembersOpen(true)}>
-          <div className="chat-pane__avatar chat-pane__avatar--broadcast">
-            <Megaphone size={18} />
-          </div>
-          <div>
-            <strong>{contactList.name}</strong>
-            <div className="chat-pane__subtitle-row">
-              <div className="chat-pane__subtitle">
-                {recipientCount} recipients
+        <div className="chat-pane__header-main">
+          <button type="button" className="mobile-back-button" onClick={onBack} title="Back to chats">
+            <ArrowLeft size={22} />
+          </button>
+          <button type="button" className="chat-pane__contact broadcast-header-button" onClick={() => setMembersOpen(true)}>
+            <div className="chat-pane__avatar chat-pane__avatar--broadcast">
+              <Megaphone size={18} />
+            </div>
+            <div>
+              <strong>{contactList.name}</strong>
+              <div className="chat-pane__subtitle-row">
+                <div className="chat-pane__subtitle">
+                  {recipientCount} recipients
+                </div>
               </div>
             </div>
-          </div>
-        </button>
+          </button>
+        </div>
       </header>
 
       <div ref={messagesRef} className="chat-pane__messages broadcast-chat-pane__messages">

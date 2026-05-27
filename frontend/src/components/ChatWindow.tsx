@@ -1,4 +1,5 @@
 import {
+  ArrowLeft,
   Bell,
   BellOff,
   Check,
@@ -40,6 +41,7 @@ type Props = {
   onSendReaction: (message: Message, emoji: string) => Promise<void>;
   onSendOptInTemplate: (templateKind: 'auto' | 'intro' | 'followup') => Promise<void>;
   onToggleMute: () => void;
+  onBack?: () => void;
 };
 
 type MediaViewerState = {
@@ -410,6 +412,7 @@ export function ChatWindow({
   onSendReaction,
   onSendOptInTemplate,
   onToggleMute,
+  onBack,
 }: Props) {
   const [draft, setDraft] = useState('');
   const [file, setFile] = useState<File | null>(null);
@@ -792,6 +795,9 @@ export function ChatWindow({
   return (
     <section className="chat-pane">
       <header className="chat-pane__header">
+        <button type="button" className="mobile-back-button" onClick={onBack} title="Back to chats">
+          <ArrowLeft size={22} />
+        </button>
         <div className="chat-pane__contact">
           <div className="chat-pane__avatar">
             {conversation.contactName.slice(0, 1).toUpperCase()}

@@ -79,6 +79,11 @@ const MESSAGE_STATUS_RANK: Record<string, number> = {
   read: 3,
 };
 
+function resolveIsMobileLayout() {
+  if (typeof window === 'undefined') return false;
+  return window.matchMedia('(max-width: 720px)').matches;
+}
+
 function mergeMessageUpdate(existing: Message, incoming: Message) {
   const existingRank = MESSAGE_STATUS_RANK[existing.status] ?? -1;
   const incomingRank = MESSAGE_STATUS_RANK[incoming.status] ?? -1;
@@ -121,9 +126,11 @@ export default function App() {
   const [campaignOpen, setCampaignOpen] = useState(false);
   const [startChatOpen, setStartChatOpen] = useState(false);
   const [addContactOpen, setAddContactOpen] = useState(false);
+  const [isMobileLayout, setIsMobileLayout] = useState(resolveIsMobileLayout);
   const deferredSearch = useDeferredValue(search);
   const optimisticMessageIdRef = useRef(-1);
   const readInFlightRef = useRef<number | null>(null);
+  const isChatOpen = Boolean(activeConversation || activeContactListId);
 
   function clearUnreadLocally(conversationId: number) {
     setConversations((current) => current.map((conversation) => (
@@ -181,7 +188,7 @@ export default function App() {
         } else {
           setActiveConversation((current) => current && current.phoneNumberId === selectedPhoneNumberId
             ? payload.items.find((item) => item.id === current.id) || payload.items[0]
-            : payload.items[0]);
+            : isMobileLayout ? null : payload.items[0]);
         }
       }
     } finally {
@@ -223,6 +230,15 @@ export default function App() {
   useEffect(() => {
     window.localStorage.setItem('jjewa-muted-conversations', JSON.stringify(mutedConversationIds));
   }, [mutedConversationIds]);
+
+  useEffect(() => {
+    const query = window.matchMedia('(max-width: 720px)');
+    const handleChange = () => setIsMobileLayout(query.matches);
+
+    handleChange();
+    query.addEventListener('change', handleChange);
+    return () => query.removeEventListener('change', handleChange);
+  }, []);
 
   useEffect(() => {
     void loadBootstrap();
@@ -568,9 +584,17 @@ export default function App() {
     });
   }
 
+  function handleBackToMobileList() {
+    setActiveConversation(null);
+    setActiveContactListId(null);
+    setActiveContactList(null);
+    setMessages([]);
+    setMessageCursor(null);
+  }
+
   return (
     <div className={`wa-page theme-${theme}`}>
-      <div className="wa-app-shell">
+      <div className={`wa-app-shell ${isChatOpen ? 'wa-app-shell--chat-open' : 'wa-app-shell--list-open'}`}>
         <ConversationList
           theme={theme}
           numbers={numbers}
@@ -619,6 +643,7 @@ export default function App() {
           {activeContactListId ? (
             <BroadcastWorkspace
               contactList={activeContactList}
+              onBack={handleBackToMobileList}
               onSendBroadcast={handleSendBroadcast}
               onContactListUpdated={(updatedList) => {
                 setActiveContactList(updatedList);
@@ -634,6 +659,7 @@ export default function App() {
               hasOlderMessages={Boolean(messageCursor)}
               loading={messageLoading}
               sending={sending}
+              onBack={handleBackToMobileList}
               onLoadOlder={() => activeConversation && void loadMessages(activeConversation.id, false)}
               onSendText={handleSendText}
               onSendAttachment={handleSendAttachment}

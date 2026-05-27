@@ -251,6 +251,30 @@ body {
   gap: 2px;
 }
 
+.chat-pane__header-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mobile-back-button {
+  display: none;
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 50%;
+  place-items: center;
+  background: transparent;
+  color: var(--app-text-soft);
+}
+
+.mobile-back-button:hover {
+  background: var(--app-hover);
+}
+
 .sidebar__number-switcher {
   padding: 10px 12px 8px;
   background: var(--app-surface);
@@ -3038,18 +3062,146 @@ label > select,
 }
 
 @media (max-width: 720px) {
+  html,
+  body,
+  #root {
+    height: 100dvh;
+  }
+
+  .wa-page,
+  .wa-app-shell {
+    width: 100vw;
+    height: 100dvh;
+    overflow: hidden;
+  }
+
+  .wa-app-shell {
+    position: relative;
+    display: block;
+  }
+
+  .sidebar,
+  .main-panel {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    transition: transform 180ms ease;
+  }
+
   .sidebar {
+    display: grid;
+    grid-template-columns: 1fr;
+    border-right: 0;
+    z-index: 2;
+  }
+
+  .sidebar__rail {
     display: none;
   }
 
+  .sidebar__panel {
+    width: 100%;
+    height: 100%;
+  }
+
+  .main-panel {
+    z-index: 3;
+  }
+
+  .wa-app-shell--list-open .sidebar {
+    transform: translateX(0);
+    pointer-events: auto;
+  }
+
+  .wa-app-shell--list-open .main-panel {
+    transform: translateX(100%);
+    pointer-events: none;
+  }
+
+  .wa-app-shell--chat-open .sidebar {
+    transform: translateX(-28%);
+    pointer-events: none;
+  }
+
+  .wa-app-shell--chat-open .main-panel {
+    transform: translateX(0);
+    pointer-events: auto;
+  }
+
+  .mobile-back-button {
+    display: grid;
+  }
+
+  .sidebar__toolbar,
+  .chat-pane__header {
+    min-height: 56px;
+    padding: 8px 10px;
+  }
+
+  .chat-pane__header {
+    gap: 8px;
+  }
+
+  .chat-pane__header-main {
+    gap: 4px;
+  }
+
+  .chat-pane__avatar {
+    width: 38px;
+    height: 38px;
+  }
+
+  .sidebar__number-switcher {
+    padding: 8px 10px;
+  }
+
+  .searchbox {
+    margin: 8px 10px;
+    padding: 10px 14px;
+    border-radius: 18px;
+  }
+
+  .conversation-card {
+    grid-template-columns: 50px 1fr;
+    padding: 12px 14px;
+  }
+
+  .conversation-card.is-active {
+    box-shadow: none;
+    background: var(--app-hover);
+  }
+
+  .sidebar__footer-action {
+    position: sticky;
+    bottom: 0;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    padding: 10px;
+    background: var(--app-surface);
+  }
+
+  .sidebar-action-tile {
+    min-height: 58px;
+    padding: 8px;
+  }
+
+  .chat-pane,
+  .broadcast-chat-pane {
+    width: 100%;
+    height: 100%;
+  }
+
   .chat-pane__messages {
+    padding-top: 14px;
+    padding-bottom: 8px;
     padding-left: 0;
     padding-right: 0;
   }
 
   .message-row {
-    padding-left: 16px;
-    padding-right: 16px;
+    padding-left: 8px;
+    padding-right: 8px;
   }
 
   .chat-pane__searchbar {
@@ -3057,7 +3209,54 @@ label > select,
   }
 
   .bubble {
-    max-width: 85%;
+    max-width: 82%;
+  }
+
+  .bubble--media-message {
+    max-width: min(86%, 340px);
+  }
+
+  .chat-pane__composer-shell {
+    padding: 6px 8px max(6px, env(safe-area-inset-bottom));
+  }
+
+  .composer {
+    gap: 6px;
+    padding: 5px 6px;
+    border-radius: 24px;
+  }
+
+  .composer textarea {
+    min-height: 38px;
+    max-height: 110px;
+    padding: 9px 10px;
+  }
+
+  .composer__icon-button,
+  .composer__attach,
+  .composer__send {
+    width: 38px;
+    height: 38px;
+  }
+
+  .emoji-picker-shell {
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    bottom: 64px;
+    width: auto;
+  }
+
+  .bottom-sheet__panel,
+  .bottom-sheet__panel--wide {
+    width: 100%;
+    max-height: 86vh;
+    border-radius: 24px 24px 0 0;
+  }
+
+  .delivery-groups,
+  .members-summary-grid {
+    grid-template-columns: 1fr;
   }
 
   .chat-optin-banner {
@@ -3073,6 +3272,18 @@ label > select,
   .campaign-drawer__panel {
     inset: 0;
     width: 100%;
+    border-radius: 0;
+  }
+
+  .dialog-layer .contact-dialog,
+  .contact-dialog {
+    width: calc(100vw - 20px);
+    max-height: 82vh;
+    border-radius: 22px;
+  }
+
+  .media-viewer__shell {
+    inset: 0;
     border-radius: 0;
   }
 

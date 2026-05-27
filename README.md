@@ -40,3 +40,14 @@ Start here:
 4. Use the verify token stored in `wa_phone_numbers.verify_token`.
 5. Start the backend.
 6. Start the frontend.
+
+Production domains:
+
+- Frontend: `https://jjewa.jayjalaram.co.in`
+- Backend API/socket: `https://jjewaapi.jayjalaram.co.in`
+- Meta webhook callback URL: `https://jjewaapi.jayjalaram.co.in/api/webhooks/meta`
+
+Production env:
+
+- Backend: copy [backend/.env.production.example](C:/Users/prana/OneDrive/Desktop/LeadOps/JJEWA/backend/.env.production.example) to `backend/.env` on the server and keep the real Supabase values.
+- Frontend: copy [frontend/.env.production.example](C:/Users/prana/OneDrive/Desktop/LeadOps/JJEWA/frontend/.env.production.example) to `frontend/.env` before running `npm run build`.
