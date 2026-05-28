@@ -147,6 +147,11 @@ function getCampaignCheckState(campaign: Campaign) {
   return 'queued';
 }
 
+function isCampaignAfterListClear(campaign: Campaign, contactList: ContactList | null) {
+  if (!contactList?.clearedAt) return true;
+  return new Date(campaign.createdAt).getTime() > new Date(contactList.clearedAt).getTime();
+}
+
 function renderCampaignStatus(campaign: Campaign) {
   const state = getCampaignCheckState(campaign);
 
@@ -335,7 +340,7 @@ export function BroadcastWorkspace({ contactList, onBack, onSendBroadcast, onCon
     setLoading(true);
     void getContactListCampaigns(contactList.id)
       .then((items) => {
-        if (!cancelled) setCampaigns(items.filter(Boolean));
+        if (!cancelled) setCampaigns(items.filter((item) => item && isCampaignAfterListClear(item, contactList)));
       })
       .catch((loadError) => {
         if (!cancelled) setError(loadError instanceof Error ? loadError.message : 'Failed to load broadcast history');
@@ -347,13 +352,14 @@ export function BroadcastWorkspace({ contactList, onBack, onSendBroadcast, onCon
     return () => {
       cancelled = true;
     };
-  }, [contactList?.id]);
+  }, [contactList?.clearedAt, contactList?.id]);
 
   useEffect(() => {
     if (!contactList) return;
 
     function handleCampaignUpdated(campaign: Campaign) {
       if (campaign.contactListId !== contactList?.id) return;
+      if (!isCampaignAfterListClear(campaign, contactList)) return;
       setCampaigns((current) => upsertCampaign(current, campaign));
       setInfoCampaign((current) => (current?.id === campaign.id ? campaign : current));
     }

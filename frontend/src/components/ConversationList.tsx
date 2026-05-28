@@ -1,5 +1,6 @@
-import { BellOff, Megaphone, MessageCircleMore, MessageSquarePlus, Moon, RefreshCw, Search, SunMedium, UserPlus } from 'lucide-react';
+import { BellOff, Eraser, Megaphone, MessageCircleMore, MessageSquarePlus, Moon, RefreshCw, Search, SunMedium, Trash2, UserPlus, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { PointerEvent } from 'react';
 import type { BusinessNumber, ContactList, Conversation } from '../types';
 
 type Props = {
@@ -21,10 +22,20 @@ type Props = {
   onComposeCampaign: () => void;
   onStartChat: () => void;
   onAddContact: () => void;
+  onClearConversation: (conversationId: number) => Promise<void>;
+  onDeleteConversation: (conversationId: number) => Promise<void>;
+  onClearContactList: (contactListId: number) => Promise<void>;
+  onDeleteContactList: (contactListId: number) => Promise<void>;
   onLoadMore: () => void;
   hasMore: boolean;
   loading: boolean;
 };
+
+type ChatActionTarget =
+  | { kind: 'conversation'; id: number; title: string }
+  | { kind: 'broadcast'; id: number; title: string };
+
+type ConfirmAction = 'clear' | 'delete';
 
 function businessLabel() {
   return 'Jay Jalaram Enterprise';
@@ -85,13 +96,23 @@ export function ConversationList({
   onComposeCampaign,
   onStartChat,
   onAddContact,
+  onClearConversation,
+  onDeleteConversation,
+  onClearContactList,
+  onDeleteContactList,
   onLoadMore,
   hasMore,
   loading,
 }: Props) {
   const [chatFilter, setChatFilter] = useState<'all' | 'unread'>('all');
+  const [actionTarget, setActionTarget] = useState<ChatActionTarget | null>(null);
+  const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionError, setActionError] = useState('');
   const listRef = useRef<HTMLDivElement | null>(null);
   const loadLockRef = useRef(false);
+  const longPressTimerRef = useRef<number | null>(null);
+  const consumedLongPressRef = useRef('');
 
   const filteredConversations = useMemo(() => (
     chatFilter === 'unread'
@@ -131,6 +152,84 @@ export function ConversationList({
     }
   }
 
+  function closeActionDialog() {
+    if (actionBusy) return;
+    setActionTarget(null);
+    setConfirmAction(null);
+    setActionError('');
+  }
+
+  function clearLongPressTimer() {
+    if (longPressTimerRef.current) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  }
+
+  function openActionDialog(target: ChatActionTarget) {
+    clearLongPressTimer();
+    setActionTarget(target);
+    setConfirmAction(null);
+    setActionError('');
+  }
+
+  function handlePressStart(event: PointerEvent<HTMLButtonElement>, target: ChatActionTarget) {
+    if (event.pointerType !== 'touch') return;
+
+    clearLongPressTimer();
+    const targetKey = `${target.kind}:${target.id}`;
+    longPressTimerRef.current = window.setTimeout(() => {
+      consumedLongPressRef.current = targetKey;
+      openActionDialog(target);
+    }, 600);
+  }
+
+  function handlePressEnd() {
+    clearLongPressTimer();
+  }
+
+  function shouldSkipClick(target: ChatActionTarget) {
+    const targetKey = `${target.kind}:${target.id}`;
+    if (consumedLongPressRef.current !== targetKey) return false;
+
+    consumedLongPressRef.current = '';
+    return true;
+  }
+
+  async function runConfirmedAction() {
+    if (!actionTarget || !confirmAction) return;
+
+    setActionBusy(true);
+    setActionError('');
+    try {
+      if (actionTarget.kind === 'conversation') {
+        if (confirmAction === 'clear') {
+          await onClearConversation(actionTarget.id);
+        } else {
+          await onDeleteConversation(actionTarget.id);
+        }
+      } else if (confirmAction === 'clear') {
+        await onClearContactList(actionTarget.id);
+      } else {
+        await onDeleteContactList(actionTarget.id);
+      }
+
+      setActionTarget(null);
+      setConfirmAction(null);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Action failed');
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  const confirmTitle = confirmAction === 'delete'
+    ? `Delete ${actionTarget?.kind === 'broadcast' ? 'broadcast' : 'chat'}?`
+    : `Clear ${actionTarget?.kind === 'broadcast' ? 'broadcast' : 'chat'}?`;
+  const confirmBody = confirmAction === 'delete'
+    ? 'This removes it from the chat list. Existing records stay in the database.'
+    : 'This starts the chat fresh by hiding older history. Existing records stay in the database.';
+
   return (
     <aside className="sidebar">
       <div className="sidebar__rail">
@@ -158,18 +257,18 @@ export function ConversationList({
             <button
               type="button"
               className="toolbar-icon-button"
-              onClick={onComposeCampaign}
-              title="New broadcast"
-            >
-              <Megaphone size={18} />
-            </button>
-            <button
-              type="button"
-              className="toolbar-icon-button"
               onClick={onRefresh}
               title="Refresh chats"
             >
               <RefreshCw size={18} />
+            </button>
+            <button
+              type="button"
+              className="toolbar-icon-button mobile-theme-toggle"
+              onClick={onToggleTheme}
+              title="Toggle theme"
+            >
+              {theme === 'dark' ? <SunMedium size={18} /> : <Moon size={18} />}
             </button>
           </div>
         </header>
@@ -224,7 +323,19 @@ export function ConversationList({
               key={`broadcast:${list.id}`}
               type="button"
               className={`conversation-card conversation-card--broadcast ${list.id === activeContactListId ? 'is-active' : ''}`}
-              onClick={() => onSelectContactList(list.id)}
+              onClick={() => {
+                const target = { kind: 'broadcast' as const, id: list.id, title: list.name };
+                if (shouldSkipClick(target)) return;
+                onSelectContactList(list.id);
+              }}
+              onPointerDown={(event) => handlePressStart(event, { kind: 'broadcast', id: list.id, title: list.name })}
+              onPointerUp={handlePressEnd}
+              onPointerCancel={handlePressEnd}
+              onPointerLeave={handlePressEnd}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                openActionDialog({ kind: 'broadcast', id: list.id, title: list.name });
+              }}
             >
               <div className="conversation-card__avatar conversation-card__avatar--broadcast">
                 <Megaphone size={18} />
@@ -246,7 +357,19 @@ export function ConversationList({
               key={conversation.id}
               type="button"
               className={`conversation-card ${conversation.id === activeConversationId ? 'is-active' : ''}`}
-              onClick={() => onSelectConversation(conversation.id)}
+              onClick={() => {
+                const target = { kind: 'conversation' as const, id: conversation.id, title: conversation.contactName };
+                if (shouldSkipClick(target)) return;
+                onSelectConversation(conversation.id);
+              }}
+              onPointerDown={(event) => handlePressStart(event, { kind: 'conversation', id: conversation.id, title: conversation.contactName })}
+              onPointerUp={handlePressEnd}
+              onPointerCancel={handlePressEnd}
+              onPointerLeave={handlePressEnd}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                openActionDialog({ kind: 'conversation', id: conversation.id, title: conversation.contactName });
+              }}
             >
               <div className="conversation-card__avatar">
                 {conversation.contactName.slice(0, 1).toUpperCase()}
@@ -309,6 +432,53 @@ export function ConversationList({
             <span>Add contact</span>
           </button>
         </div>
+      </div>
+
+      <div className={`dialog-layer chat-action-layer ${actionTarget ? 'is-open' : ''}`} aria-hidden={!actionTarget}>
+        <div className="dialog-layer__backdrop" onClick={closeActionDialog} />
+        <section className="chat-action-sheet frosted-panel" role="dialog" aria-modal="true">
+          <header className="chat-action-sheet__header">
+            <div>
+              <span className="bottom-sheet__eyebrow">
+                {actionTarget?.kind === 'broadcast' ? 'Broadcast list' : 'Chat'}
+              </span>
+              <h2>{confirmAction ? confirmTitle : actionTarget?.title}</h2>
+              {confirmAction && <p>{confirmBody}</p>}
+            </div>
+            <button type="button" className="toolbar-icon-button" onClick={closeActionDialog} title="Close">
+              <X size={18} />
+            </button>
+          </header>
+
+          {actionError && <div className="form-error chat-action-sheet__error">{actionError}</div>}
+
+          {!confirmAction ? (
+            <div className="chat-action-sheet__actions">
+              <button type="button" onClick={() => setConfirmAction('clear')}>
+                <Eraser size={18} />
+                <span>Clear {actionTarget?.kind === 'broadcast' ? 'broadcast' : 'chat'}</span>
+              </button>
+              <button type="button" className="is-danger" onClick={() => setConfirmAction('delete')}>
+                <Trash2 size={18} />
+                <span>Delete {actionTarget?.kind === 'broadcast' ? 'broadcast' : 'chat'}</span>
+              </button>
+            </div>
+          ) : (
+            <footer className="chat-action-sheet__confirm">
+              <button type="button" className="ghost-button" onClick={() => setConfirmAction(null)} disabled={actionBusy}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className={`primary-button ${confirmAction === 'delete' ? 'primary-button--danger' : ''}`}
+                onClick={() => void runConfirmedAction()}
+                disabled={actionBusy}
+              >
+                {actionBusy ? 'Working...' : confirmAction === 'delete' ? 'Yes, delete' : 'Yes, clear'}
+              </button>
+            </footer>
+          )}
+        </section>
       </div>
     </aside>
   );

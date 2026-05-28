@@ -114,6 +114,7 @@ body {
   display: grid;
   grid-template-columns: 72px 1fr;
   min-width: 0;
+  min-height: 0;
   border-right: 1px solid var(--app-border);
   background: var(--app-surface);
 }
@@ -163,6 +164,7 @@ body {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   background: var(--app-surface);
 }
 
@@ -249,6 +251,10 @@ body {
   display: flex;
   align-items: center;
   gap: 2px;
+}
+
+.mobile-theme-toggle {
+  display: none;
 }
 
 .chat-pane__header-main {
@@ -342,6 +348,7 @@ body {
 
 .conversation-list {
   flex: 1;
+  min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
 }
@@ -2105,6 +2112,83 @@ body {
   gap: 12px;
 }
 
+.chat-action-layer {
+  z-index: 42;
+}
+
+.chat-action-sheet {
+  position: absolute;
+  left: 50%;
+  bottom: 24px;
+  width: min(420px, calc(100vw - 28px));
+  transform: translateX(-50%);
+  border-radius: 26px;
+  color: var(--app-text);
+  overflow: hidden;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.32);
+}
+
+.chat-action-sheet__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.chat-action-sheet__header h2 {
+  margin: 4px 0 0;
+  font-size: 1.08rem;
+}
+
+.chat-action-sheet__header p {
+  margin: 8px 0 0;
+  color: var(--app-text-soft);
+  line-height: 1.45;
+  font-size: 0.88rem;
+}
+
+.chat-action-sheet__error {
+  margin: 14px 16px 0;
+}
+
+.chat-action-sheet__actions {
+  padding: 10px;
+}
+
+.chat-action-sheet__actions button {
+  width: 100%;
+  border: 0;
+  border-radius: 16px;
+  padding: 14px 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: transparent;
+  color: var(--app-text);
+  text-align: left;
+}
+
+.chat-action-sheet__actions button:hover {
+  background: rgba(0, 168, 132, 0.1);
+}
+
+.chat-action-sheet__actions button.is-danger {
+  color: #ff7a7a;
+}
+
+.theme-light .chat-action-sheet__actions button.is-danger {
+  color: #d64545;
+}
+
+.chat-action-sheet__confirm {
+  padding: 16px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .media-viewer {
   position: fixed;
   inset: 0;
@@ -2396,6 +2480,11 @@ body {
   border-color: #00a884;
 }
 
+.primary-button--danger {
+  background: #d64545;
+  border-color: #d64545;
+}
+
 .icon-button {
   width: 40px;
   height: 40px;
@@ -2405,14 +2494,19 @@ body {
 .campaign-drawer {
   position: fixed;
   inset: 0;
-  display: none;
-  background: rgba(11, 20, 26, 0.32);
-  backdrop-filter: blur(10px);
-  z-index: 25;
+  display: block;
+  opacity: 0;
+  pointer-events: none;
+  background: rgba(11, 20, 26, 0.48);
+  backdrop-filter: blur(18px) saturate(0.92);
+  -webkit-backdrop-filter: blur(18px) saturate(0.92);
+  transition: opacity 160ms ease;
+  z-index: 70;
 }
 
 .campaign-drawer.is-open {
-  display: block;
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .campaign-drawer__panel {
@@ -2427,6 +2521,16 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  opacity: 0;
+  transform: translateX(18px) scale(0.985);
+  transition:
+    opacity 180ms ease,
+    transform 180ms ease;
+}
+
+.campaign-drawer.is-open .campaign-drawer__panel {
+  opacity: 1;
+  transform: translateX(0) scale(1);
 }
 
 .campaign-drawer__panel--simple {
@@ -3104,6 +3208,8 @@ label > select,
   .sidebar__panel {
     width: 100%;
     height: 100%;
+    min-height: 0;
+    overflow: hidden;
   }
 
   .main-panel {
@@ -3131,6 +3237,10 @@ label > select,
   }
 
   .mobile-back-button {
+    display: grid;
+  }
+
+  .mobile-theme-toggle {
     display: grid;
   }
 
@@ -3168,14 +3278,23 @@ label > select,
     padding: 12px 14px;
   }
 
+  .conversation-list {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-y;
+  }
+
   .conversation-card.is-active {
     box-shadow: none;
     background: var(--app-hover);
   }
 
   .sidebar__footer-action {
-    position: sticky;
+    position: relative;
     bottom: 0;
+    flex-shrink: 0;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     padding: 10px;
     background: var(--app-surface);

@@ -11,6 +11,9 @@ const MESSAGE_STATUS_RANK = {
 };
 
 const CONTACT_PAGE_SIZE = 1000;
+const CONTACT_PICKER_PAGE_SIZE = 300;
+const CONTACT_SEARCH_SCAN_LIMIT = 3000;
+const ALPHABET = 'abcdefghijklmnopqrstuvwxyz'.split('');
 
 function requireData(result) {
   if (result.error) {
@@ -96,6 +99,63 @@ function mapContact(row) {
   };
 }
 
+function getContactDisplayName(row) {
+  return String(row?.profile_name || row?.business_directory_name || row?.phone_number || row?.wa_id || '').trim();
+}
+
+function isAlphabeticContact(row) {
+  return /^[a-z]/i.test(getContactDisplayName(row));
+}
+
+function compareContactRows(left, right) {
+  const leftName = getContactDisplayName(left);
+  const rightName = getContactDisplayName(right);
+  const leftIsAlpha = /^[a-z]/i.test(leftName);
+  const rightIsAlpha = /^[a-z]/i.test(rightName);
+
+  if (leftIsAlpha !== rightIsAlpha) {
+    return leftIsAlpha ? -1 : 1;
+  }
+
+  const nameCompare = leftName.localeCompare(rightName, 'en', {
+    numeric: true,
+    sensitivity: 'base',
+  });
+
+  if (nameCompare !== 0) return nameCompare;
+  return String(left?.wa_id || '').localeCompare(String(right?.wa_id || ''), 'en', { numeric: true });
+}
+
+function clampContactPickerLimit(limit) {
+  const requested = Number(limit) || CONTACT_PICKER_PAGE_SIZE;
+  return Math.min(CONTACT_PICKER_PAGE_SIZE, Math.max(1, requested));
+}
+
+function parseContactPageCursor(cursor) {
+  if (!cursor) {
+    return { section: 'alpha', offset: 0, skip: 0 };
+  }
+
+  const [section, rawOffset, rawSkip] = String(cursor).split(':');
+  return {
+    section: section === 'other' || section === 'search' ? section : 'alpha',
+    offset: Math.max(0, Number(rawOffset) || 0),
+    skip: Math.max(0, Number(rawSkip) || 0),
+  };
+}
+
+function makeContactPageCursor(section, offset, skip = 0) {
+  return `${section}:${offset}:${skip}`;
+}
+
+function buildAlphabeticContactFilter() {
+  return [
+    ...ALPHABET.map((letter) => `profile_name.ilike.${letter}%`),
+    ...ALPHABET.map((letter) => `and(profile_name.is.null,business_directory_name.ilike.${letter}%)`),
+    ...ALPHABET.map((letter) => `and(profile_name.eq.,business_directory_name.ilike.${letter}%)`),
+  ].join(',');
+}
+
 function mapConversation(row, contact, number) {
   if (!row) return null;
 
@@ -117,6 +177,8 @@ function mapConversation(row, contact, number) {
     lastMessagePreview: row.last_message_preview,
     lastMessageAt: row.last_message_at,
     unreadCount: row.unread_count,
+    isArchived: Boolean(row.is_archived),
+    clearedAt: row.cleared_at,
   };
 }
 
@@ -206,6 +268,8 @@ function mapContactList(row, members = [], memberCount = null) {
     phoneNumberId: row.phone_number_id,
     name: row.name,
     source: row.source,
+    isArchived: Boolean(row.is_archived),
+    clearedAt: row.cleared_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     memberCount: memberCount ?? members.length,
@@ -269,7 +333,7 @@ async function buildConversationModels(rows) {
   return rows.map((row) => mapConversation(row, contacts.get(row.contact_id), numbers.get(row.phone_number_id)));
 }
 
-async function getContactMatchIds(search) {
+async function getContactMatchIds(search, limit = 200) {
   const query = search?.trim();
   if (!query) return null;
 
@@ -281,7 +345,7 @@ async function getContactMatchIds(search) {
       .from('wa_contacts')
       .select('id')
       .or(`phone_number.ilike.%${digitOnly}%,wa_id.ilike.%${digitOnly}%`)
-      .limit(200);
+      .limit(limit);
 
     matchRows = matchRows.concat(requireData(numberMatches));
   }
@@ -290,9 +354,17 @@ async function getContactMatchIds(search) {
     .from('wa_contacts')
     .select('id')
     .ilike('profile_name', `%${query}%`)
-    .limit(200);
+    .limit(limit);
 
   matchRows = matchRows.concat(requireData(nameMatches));
+
+  const directoryNameMatches = await supabase
+    .from('wa_contacts')
+    .select('id')
+    .ilike('business_directory_name', `%${query}%`)
+    .limit(limit);
+
+  matchRows = matchRows.concat(requireData(directoryNameMatches));
 
   const ids = [...new Set(matchRows.map((row) => row.id))];
   return ids;
@@ -412,6 +484,121 @@ export async function listContacts({ search = '', limit = 100 }) {
   return rows.map(mapContact);
 }
 
+async function fetchAlphabeticContactRows(offset, limit) {
+  const result = await supabase
+    .from('wa_contacts')
+    .select('*')
+    .or(buildAlphabeticContactFilter())
+    .order('profile_name', { ascending: true })
+    .order('business_directory_name', { ascending: true })
+    .order('wa_id', { ascending: true })
+    .range(offset, offset + limit - 1);
+
+  return requireData(result).sort(compareContactRows);
+}
+
+async function fetchOtherContactRows(offset, skip, limit) {
+  const rows = [];
+  let scanOffset = offset;
+  let skipInCurrentPage = skip;
+
+  while (rows.length < limit) {
+    const result = await supabase
+      .from('wa_contacts')
+      .select('*')
+      .order('profile_name', { ascending: true })
+      .order('business_directory_name', { ascending: true })
+      .order('wa_id', { ascending: true })
+      .range(scanOffset, scanOffset + CONTACT_PAGE_SIZE - 1);
+
+    const page = requireData(result);
+    const otherRows = page.filter((row) => !isAlphabeticContact(row));
+    const availableRows = otherRows.slice(skipInCurrentPage);
+    const needed = limit - rows.length;
+
+    rows.push(...availableRows.slice(0, needed));
+
+    if (availableRows.length > needed) {
+      return {
+        rows: rows.sort(compareContactRows),
+        nextCursor: makeContactPageCursor('other', scanOffset, skipInCurrentPage + needed),
+      };
+    }
+
+    scanOffset += page.length;
+    skipInCurrentPage = 0;
+
+    if (page.length < CONTACT_PAGE_SIZE) {
+      return {
+        rows: rows.sort(compareContactRows),
+        nextCursor: null,
+      };
+    }
+  }
+
+  return {
+    rows: rows.sort(compareContactRows),
+    nextCursor: makeContactPageCursor('other', scanOffset, 0),
+  };
+}
+
+export async function listContactsPage({ search = '', limit = CONTACT_PICKER_PAGE_SIZE, cursor = null }) {
+  const trimmedSearch = search.trim();
+  const requestedLimit = clampContactPickerLimit(limit);
+  const parsedCursor = parseContactPageCursor(cursor);
+
+  if (trimmedSearch) {
+    const ids = await getContactMatchIds(trimmedSearch, CONTACT_SEARCH_SCAN_LIMIT);
+    if (!ids || ids.length === 0) {
+      return { items: [], nextCursor: null };
+    }
+
+    const offset = parsedCursor.section === 'search' ? parsedCursor.offset : 0;
+    const contacts = [...(await fetchContactsByIds(ids)).values()]
+      .filter(Boolean)
+      .sort(compareContactRows);
+    const pageRows = contacts.slice(offset, offset + requestedLimit);
+    const nextCursor = contacts.length > offset + requestedLimit
+      ? makeContactPageCursor('search', offset + requestedLimit, 0)
+      : null;
+
+    return {
+      items: pageRows.map(mapContact),
+      nextCursor,
+    };
+  }
+
+  if (parsedCursor.section === 'other') {
+    const otherPage = await fetchOtherContactRows(parsedCursor.offset, parsedCursor.skip, requestedLimit);
+    return {
+      items: otherPage.rows.map(mapContact),
+      nextCursor: otherPage.nextCursor,
+    };
+  }
+
+  const alphaRows = await fetchAlphabeticContactRows(parsedCursor.offset, requestedLimit + 1);
+  if (alphaRows.length > requestedLimit) {
+    return {
+      items: alphaRows.slice(0, requestedLimit).map(mapContact),
+      nextCursor: makeContactPageCursor('alpha', parsedCursor.offset + requestedLimit, 0),
+    };
+  }
+
+  const remainingLimit = requestedLimit - alphaRows.length;
+  if (remainingLimit <= 0) {
+    return {
+      items: alphaRows.map(mapContact),
+      nextCursor: null,
+    };
+  }
+
+  const otherPage = await fetchOtherContactRows(0, 0, remainingLimit);
+  return {
+    items: [...alphaRows, ...otherPage.rows].map(mapContact),
+    nextCursor: otherPage.nextCursor,
+  };
+}
+
 export async function bulkUpsertContacts(contacts = []) {
   const results = [];
 
@@ -504,13 +691,25 @@ export async function upsertContact({
 export async function ensureConversation(phoneNumberDbId, contactId) {
   const existing = await supabase
     .from('wa_conversations')
-    .select('id')
+    .select('id, is_archived')
     .eq('phone_number_id', phoneNumberDbId)
     .eq('contact_id', contactId)
     .maybeSingle();
 
   const found = requireData(existing);
-  if (found) return found.id;
+  if (found) {
+    if (found.is_archived) {
+      requireData(await supabase
+        .from('wa_conversations')
+        .update({
+          is_archived: false,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', found.id));
+    }
+
+    return found.id;
+  }
 
   const inserted = await supabase
     .from('wa_conversations')
@@ -566,6 +765,7 @@ export async function touchConversation({ conversationId, messageId, preview, ti
     last_message_preview: preview,
     last_message_at: toIso(timestamp),
     updated_at: new Date().toISOString(),
+    is_archived: false,
     unread_count: unreadIncrement > 0 ? Number(row.unread_count || 0) + unreadIncrement : Number(row.unread_count || 0),
   };
 
@@ -587,6 +787,40 @@ export async function markConversationRead(conversationId) {
     .eq('id', conversationId);
 
   requireData(result);
+}
+
+export async function clearConversation(conversationId) {
+  const now = new Date().toISOString();
+  requireData(await supabase
+    .from('wa_conversations')
+    .update({
+      last_message_id: null,
+      last_message_preview: null,
+      last_message_at: null,
+      unread_count: 0,
+      cleared_at: now,
+      is_archived: false,
+      updated_at: now,
+    })
+    .eq('id', conversationId));
+
+  return getConversationById(conversationId);
+}
+
+export async function archiveConversation(conversationId) {
+  const now = new Date().toISOString();
+  requireData(await supabase
+    .from('wa_conversations')
+    .update({
+      last_message_id: null,
+      last_message_preview: null,
+      last_message_at: null,
+      unread_count: 0,
+      cleared_at: now,
+      is_archived: true,
+      updated_at: now,
+    })
+    .eq('id', conversationId));
 }
 
 export async function listRecentInboundWaMessageIds(conversationId, limit = 20) {
@@ -634,6 +868,7 @@ export async function listConversations({ phoneNumberId, search, limit = 40, cur
   let query = supabase
     .from('wa_conversations')
     .select('*')
+    .eq('is_archived', false)
     .order('last_message_at', { ascending: false, nullsFirst: false })
     .limit(limit + 1);
 
@@ -697,6 +932,11 @@ export async function insertMessage(message) {
 
 export async function listMessages({ conversationId, limit = 50, cursor }) {
   const { time } = splitCursor(cursor);
+  const conversation = requireData(await supabase
+    .from('wa_conversations')
+    .select('cleared_at')
+    .eq('id', conversationId)
+    .maybeSingle());
 
   let query = supabase
     .from('wa_messages')
@@ -707,6 +947,10 @@ export async function listMessages({ conversationId, limit = 50, cursor }) {
 
   if (time) {
     query = query.lt('created_at', time);
+  }
+
+  if (conversation?.cleared_at) {
+    query = query.gt('created_at', conversation.cleared_at);
   }
 
   const rows = requireData(await query);
@@ -841,6 +1085,7 @@ export async function listContactLists(phoneNumberId = null) {
   let query = supabase
     .from('wa_contact_lists')
     .select('*')
+    .eq('is_archived', false)
     .order('created_at', { ascending: false });
 
   if (phoneNumberId) {
@@ -966,6 +1211,32 @@ export async function replaceContactListMembers({ listId, contacts = [] }) {
   return getContactListById(listId);
 }
 
+export async function clearContactList(listId) {
+  const now = new Date().toISOString();
+  requireData(await supabase
+    .from('wa_contact_lists')
+    .update({
+      cleared_at: now,
+      is_archived: false,
+      updated_at: now,
+    })
+    .eq('id', listId));
+
+  return getContactListById(listId);
+}
+
+export async function archiveContactList(listId) {
+  const now = new Date().toISOString();
+  requireData(await supabase
+    .from('wa_contact_lists')
+    .update({
+      cleared_at: now,
+      is_archived: true,
+      updated_at: now,
+    })
+    .eq('id', listId));
+}
+
 export async function createCampaign({
   phoneNumberId,
   contactListId = null,
@@ -999,6 +1270,16 @@ export async function createCampaign({
 
   const campaign = mapCampaign(requireData(campaignInsert));
 
+  if (contactListId) {
+    requireData(await supabase
+      .from('wa_contact_lists')
+      .update({
+        is_archived: false,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', contactListId));
+  }
+
   if (recipients.length > 0) {
     const recipientRows = recipients.map((recipient) => ({
       campaign_id: campaign.id,
@@ -1030,12 +1311,24 @@ export async function listCampaigns(limit = 20) {
 }
 
 export async function listCampaignsByContactList(contactListId, limit = 50, { includeRecipients = false } = {}) {
-  const rows = requireData(await supabase
+  const contactList = requireData(await supabase
+    .from('wa_contact_lists')
+    .select('cleared_at')
+    .eq('id', contactListId)
+    .maybeSingle());
+
+  let query = supabase
     .from('wa_campaigns')
     .select('*')
     .eq('contact_list_id', contactListId)
     .order('created_at', { ascending: true })
-    .limit(limit));
+    .limit(limit);
+
+  if (contactList?.cleared_at) {
+    query = query.gt('created_at', contactList.cleared_at);
+  }
+
+  const rows = requireData(await query);
 
   if (!includeRecipients) {
     return rows.map(mapCampaign);

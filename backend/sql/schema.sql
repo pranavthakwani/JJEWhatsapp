@@ -53,6 +53,7 @@ create table if not exists public.wa_conversations (
   last_message_at timestamptz null,
   unread_count integer not null default 0,
   is_archived boolean not null default false,
+  cleared_at timestamptz null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique (phone_number_id, contact_id)
@@ -110,6 +111,8 @@ create table if not exists public.wa_contact_lists (
   phone_number_id bigint not null references public.wa_phone_numbers(id) on delete cascade,
   name text not null,
   source text not null default 'manual',
+  is_archived boolean not null default false,
+  cleared_at timestamptz null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -187,6 +190,10 @@ alter table public.wa_contacts add column if not exists opt_in_source text null;
 alter table public.wa_contacts add column if not exists opt_in_updated_at timestamptz null;
 alter table public.wa_contacts add column if not exists last_opt_in_template_name text null;
 alter table public.wa_contacts add column if not exists last_opt_in_prompt_at timestamptz null;
+alter table public.wa_conversations add column if not exists cleared_at timestamptz null;
+alter table public.wa_conversations add column if not exists is_archived boolean not null default false;
+alter table public.wa_contact_lists add column if not exists is_archived boolean not null default false;
+alter table public.wa_contact_lists add column if not exists cleared_at timestamptz null;
 alter table public.wa_campaigns add column if not exists contact_list_id bigint null references public.wa_contact_lists(id) on delete set null;
 alter table public.wa_campaigns add column if not exists initial_template_name text null;
 alter table public.wa_campaigns add column if not exists followup_template_name text null;

@@ -40,6 +40,8 @@ export type ContactList = {
   phoneNumberId: number;
   name: string;
   source: string;
+  isArchived?: boolean;
+  clearedAt?: string | null;
   createdAt: string;
   updatedAt: string;
   memberCount?: number;
@@ -64,6 +66,8 @@ export type Conversation = {
   lastMessagePreview: string | null;
   lastMessageAt: string | null;
   unreadCount: number;
+  isArchived?: boolean;
+  clearedAt?: string | null;
 };
 
 export type Message = {

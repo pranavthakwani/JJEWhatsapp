@@ -5,7 +5,11 @@ import { ConversationList } from './components/ConversationList';
 import { BroadcastWorkspace } from './components/BroadcastWorkspace';
 import { AddContactDialog, StartChatDialog } from './components/ContactDialogs';
 import {
+  clearContactList,
+  clearConversation,
   createCampaign,
+  deleteContactList,
+  deleteConversation,
   getBootstrap,
   getContactList,
   getContactLists,
@@ -103,6 +107,11 @@ function mergeMessageUpdate(existing: Message, incoming: Message) {
 
 function sortMessages(items: Message[]) {
   return [...items].sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime());
+}
+
+function isMessageAfterConversationClear(message: Message, conversation: Conversation | null) {
+  if (!conversation?.clearedAt) return true;
+  return new Date(message.createdAt).getTime() > new Date(conversation.clearedAt).getTime();
 }
 
 export default function App() {
@@ -264,6 +273,12 @@ export default function App() {
     function handleConversationUpdated(conversation: Conversation) {
       if (conversation.phoneNumberId !== selectedPhoneNumberId) return;
 
+      if (conversation.isArchived) {
+        setConversations((current) => current.filter((item) => item.id !== conversation.id));
+        setActiveConversation((current) => (current?.id === conversation.id ? null : current));
+        return;
+      }
+
       const shouldAutoRead = activeConversation?.id === conversation.id;
       const nextConversation = shouldAutoRead
         ? { ...conversation, unreadCount: 0 }
@@ -279,6 +294,10 @@ export default function App() {
 
     function handleMessageCreated(message: Message) {
       const isActiveConversationMessage = message.conversationId === activeConversation?.id;
+      if (isActiveConversationMessage && !isMessageAfterConversationClear(message, activeConversation)) {
+        return;
+      }
+
       if (isActiveConversationMessage) {
         setMessages((current) => (
           current.some((item) => item.id === message.id) ? current : [...current, message]
@@ -291,6 +310,10 @@ export default function App() {
     }
 
     function handleMessageStatus(message: Message) {
+      if (message.conversationId === activeConversation?.id && !isMessageAfterConversationClear(message, activeConversation)) {
+        return;
+      }
+
       setMessages((current) => {
         const existingIndex = current.findIndex((item) => (
           item.id === message.id
@@ -307,16 +330,52 @@ export default function App() {
       });
     }
 
+    function handleConversationDeleted(payload: { id: number; phoneNumberId: number }) {
+      if (payload.phoneNumberId !== selectedPhoneNumberId) return;
+      setConversations((current) => current.filter((conversation) => conversation.id !== payload.id));
+      setActiveConversation((current) => (current?.id === payload.id ? null : current));
+      if (activeConversation?.id === payload.id) {
+        setMessages([]);
+        setMessageCursor(null);
+      }
+    }
+
+    function handleContactListUpdated(list: ContactList) {
+      if (list.phoneNumberId !== selectedPhoneNumberId) return;
+      if (list.isArchived) {
+        setContactLists((current) => current.filter((item) => item.id !== list.id));
+        setActiveContactListId((current) => (current === list.id ? null : current));
+        setActiveContactList((current) => (current?.id === list.id ? null : current));
+        return;
+      }
+
+      setContactLists((current) => upsertContactList(current, list));
+      setActiveContactList((current) => (current?.id === list.id ? list : current));
+    }
+
+    function handleContactListDeleted(payload: { id: number; phoneNumberId: number }) {
+      if (payload.phoneNumberId !== selectedPhoneNumberId) return;
+      setContactLists((current) => current.filter((list) => list.id !== payload.id));
+      setActiveContactListId((current) => (current === payload.id ? null : current));
+      setActiveContactList((current) => (current?.id === payload.id ? null : current));
+    }
+
     socket.on('conversation:updated', handleConversationUpdated);
+    socket.on('conversation:deleted', handleConversationDeleted);
     socket.on('message:created', handleMessageCreated);
     socket.on('message:status', handleMessageStatus);
+    socket.on('contact-list:updated', handleContactListUpdated);
+    socket.on('contact-list:deleted', handleContactListDeleted);
 
     return () => {
       socket.off('conversation:updated', handleConversationUpdated);
+      socket.off('conversation:deleted', handleConversationDeleted);
       socket.off('message:created', handleMessageCreated);
       socket.off('message:status', handleMessageStatus);
+      socket.off('contact-list:updated', handleContactListUpdated);
+      socket.off('contact-list:deleted', handleContactListDeleted);
     };
-  }, [activeConversation?.id, selectedPhoneNumberId]);
+  }, [activeConversation, selectedPhoneNumberId]);
 
   async function handleSendText(text: string, replyToWaMessageId?: string | null) {
     if (!activeConversation) return;
@@ -584,6 +643,44 @@ export default function App() {
     });
   }
 
+  async function handleClearConversation(conversationId: number) {
+    const updatedConversation = await clearConversation(conversationId);
+    setConversations((current) => upsertConversation(current, updatedConversation));
+    setActiveConversation((current) => (current?.id === conversationId ? updatedConversation : current));
+
+    if (activeConversation?.id === conversationId) {
+      setMessages([]);
+      setMessageCursor(null);
+    }
+  }
+
+  async function handleDeleteConversation(conversationId: number) {
+    await deleteConversation(conversationId);
+    setConversations((current) => current.filter((conversation) => conversation.id !== conversationId));
+
+    if (activeConversation?.id === conversationId) {
+      setActiveConversation(null);
+      setMessages([]);
+      setMessageCursor(null);
+    }
+  }
+
+  async function handleClearContactList(contactListId: number) {
+    const updatedList = await clearContactList(contactListId);
+    setContactLists((current) => upsertContactList(current, updatedList));
+    setActiveContactList((current) => (current?.id === contactListId ? updatedList : current));
+  }
+
+  async function handleDeleteContactList(contactListId: number) {
+    await deleteContactList(contactListId);
+    setContactLists((current) => current.filter((list) => list.id !== contactListId));
+
+    if (activeContactListId === contactListId) {
+      setActiveContactListId(null);
+      setActiveContactList(null);
+    }
+  }
+
   function handleBackToMobileList() {
     setActiveConversation(null);
     setActiveContactListId(null);
@@ -634,6 +731,10 @@ export default function App() {
           onComposeCampaign={() => setCampaignOpen(true)}
           onStartChat={() => setStartChatOpen(true)}
           onAddContact={() => setAddContactOpen(true)}
+          onClearConversation={handleClearConversation}
+          onDeleteConversation={handleDeleteConversation}
+          onClearContactList={handleClearContactList}
+          onDeleteContactList={handleDeleteContactList}
           onLoadMore={() => void loadConversations(false)}
           hasMore={Boolean(conversationCursor)}
           loading={conversationLoading}

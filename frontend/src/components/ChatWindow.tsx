@@ -451,7 +451,7 @@ export function ChatWindow({
     lastInboundAtMs && Number.isFinite(lastInboundAtMs) && Date.now() - lastInboundAtMs < CUSTOMER_SERVICE_WINDOW_MS,
   );
   const isOptedIn = conversation?.contactOptInStatus === 'opted_in';
-  const isNormalChatLocked = Boolean(conversation && (!isOptedIn || !hasOpenCustomerWindow));
+  const isNormalChatLocked = Boolean(conversation && !hasOpenCustomerWindow);
   const hasPendingOptIn = Boolean(conversation && ['pending_initial', 'pending_followup'].includes(conversation.contactOptInStatus));
   const hasSentIntroTemplate = Boolean(
     conversation?.contactLastOptInPromptAt ||
@@ -461,14 +461,14 @@ export function ChatWindow({
   );
   const recommendedTemplateKind: 'intro' | 'followup' = hasSentIntroTemplate ? 'followup' : 'intro';
   const recommendedTemplateLabel = recommendedTemplateKind === 'followup' ? 'Send Followup Message' : 'Send Intro Message';
-  const lockTitle = isOptedIn ? '24-hour chat window is closed' : hasPendingOptIn ? 'Waiting for customer opt-in' : 'Customer has not opted in';
+  const lockTitle = '24-hour chat window is closed';
   const lockDescription = isOptedIn
-    ? 'Send a follow-up template first. When the customer replies or taps Yes, normal chat opens again.'
+    ? 'Send a follow-up template first. When the customer replies, normal chat opens again.'
     : hasPendingOptIn
-      ? 'Normal messages stay locked until the customer accepts the opt-in request.'
+      ? 'The customer has not replied inside the active window. Send the follow-up template to reopen the reply flow.'
       : recommendedTemplateKind === 'followup'
         ? 'Intro message was already sent. Send the follow-up template to reopen the customer reply flow.'
-        : 'Send the intro template so the customer can accept and start normal chat.';
+        : 'Send the intro template first. When the customer replies, normal chat opens for 24 hours.';
 
   const visibleMessages = useMemo(
     () => messages.filter((message) => message.messageType !== 'reaction'),

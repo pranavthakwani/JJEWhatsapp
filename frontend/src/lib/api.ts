@@ -41,6 +41,15 @@ export async function markConversationRead(conversationId: number) {
   await api.post(`/conversations/${conversationId}/read`);
 }
 
+export async function clearConversation(conversationId: number) {
+  const { data } = await api.post<Conversation>(`/conversations/${conversationId}/clear`);
+  return data;
+}
+
+export async function deleteConversation(conversationId: number) {
+  await api.delete(`/conversations/${conversationId}`);
+}
+
 export async function sendConversationMessage(
   conversationId: number,
   payload: {
@@ -84,6 +93,14 @@ export async function searchContacts(query: string) {
 export async function listContacts(query = '', limit = 250) {
   const { data } = await api.get<Contact[]>('/contacts', {
     params: { q: query, limit },
+  });
+
+  return data;
+}
+
+export async function listContactsPage(query = '', limit = 300, cursor?: string | null) {
+  const { data } = await api.get<PaginatedResult<Contact>>('/contacts/page', {
+    params: { q: query, limit, cursor },
   });
 
   return data;
@@ -177,6 +194,15 @@ export async function replaceContactListMembers(listId: number, contacts: Array<
   });
 
   return data;
+}
+
+export async function clearContactList(listId: number) {
+  const { data } = await api.post<ContactList>(`/contact-lists/${listId}/clear`);
+  return data;
+}
+
+export async function deleteContactList(listId: number) {
+  await api.delete(`/contact-lists/${listId}`);
 }
 
 export async function syncTemplates(phoneNumberId: number) {

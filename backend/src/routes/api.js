@@ -172,6 +172,37 @@ export function createApiRouter(io) {
     }
   });
 
+  router.post('/conversations/:conversationId/clear', async (req, res, next) => {
+    try {
+      const conversation = await repo.clearConversation(Number(req.params.conversationId));
+      if (!conversation) {
+        res.status(404).json({ error: 'Conversation not found' });
+        return;
+      }
+
+      io.emit('conversation:updated', conversation);
+      res.json(conversation);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.delete('/conversations/:conversationId', async (req, res, next) => {
+    try {
+      const conversation = await repo.getConversationById(Number(req.params.conversationId));
+      if (!conversation) {
+        res.status(404).json({ error: 'Conversation not found' });
+        return;
+      }
+
+      await repo.archiveConversation(Number(req.params.conversationId));
+      io.emit('conversation:deleted', { id: conversation.id, phoneNumberId: conversation.phoneNumberId });
+      res.json({ ok: true });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.post('/conversations/start', async (req, res, next) => {
     try {
       const body = req.body || {};
@@ -399,6 +430,17 @@ export function createApiRouter(io) {
     }
   });
 
+  router.get('/contacts/page', async (req, res, next) => {
+    try {
+      const search = req.query.q?.toString() || '';
+      const limit = req.query.limit ? Number(req.query.limit) : 300;
+      const cursor = req.query.cursor?.toString() || null;
+      res.json(await repo.listContactsPage({ search, limit, cursor }));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.get('/contacts', async (req, res, next) => {
     try {
       const search = req.query.q?.toString() || '';
@@ -503,6 +545,37 @@ export function createApiRouter(io) {
         listId: Number(req.params.listId),
         contacts,
       }));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/contact-lists/:listId/clear', async (req, res, next) => {
+    try {
+      const list = await repo.clearContactList(Number(req.params.listId));
+      if (!list) {
+        res.status(404).json({ error: 'Broadcast list not found' });
+        return;
+      }
+
+      io.emit('contact-list:updated', list);
+      res.json(list);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.delete('/contact-lists/:listId', async (req, res, next) => {
+    try {
+      const list = await repo.getContactListById(Number(req.params.listId));
+      if (!list) {
+        res.status(404).json({ error: 'Broadcast list not found' });
+        return;
+      }
+
+      await repo.archiveContactList(Number(req.params.listId));
+      io.emit('contact-list:deleted', { id: list.id, phoneNumberId: list.phoneNumberId });
+      res.json({ ok: true });
     } catch (error) {
       next(error);
     }

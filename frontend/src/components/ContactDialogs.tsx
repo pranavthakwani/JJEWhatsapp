@@ -1,9 +1,10 @@
 import { Check, Search, UserPlus, X } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
-import { createContact, listContacts } from '../lib/api';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { UIEvent } from 'react';
+import { createContact, listContactsPage } from '../lib/api';
 import type { Contact } from '../types';
 
-const CONTACT_FETCH_LIMIT = 50000;
+const CONTACT_FETCH_LIMIT = 300;
 
 type StartChatDialogProps = {
   open: boolean;
@@ -19,6 +20,36 @@ type AddContactDialogProps = {
 
 function getContactName(contact: Contact) {
   return contact.profileName || contact.businessDirectoryName || contact.phoneNumber || contact.waId;
+}
+
+function isAlphabeticContact(contact: Contact) {
+  return /^[a-z]/i.test(getContactName(contact).trim());
+}
+
+function compareContacts(left: Contact, right: Contact) {
+  const leftName = getContactName(left).trim();
+  const rightName = getContactName(right).trim();
+  const leftIsAlpha = isAlphabeticContact(left);
+  const rightIsAlpha = isAlphabeticContact(right);
+
+  if (leftIsAlpha !== rightIsAlpha) {
+    return leftIsAlpha ? -1 : 1;
+  }
+
+  const nameCompare = leftName.localeCompare(rightName, 'en', {
+    numeric: true,
+    sensitivity: 'base',
+  });
+
+  if (nameCompare !== 0) return nameCompare;
+  return left.waId.localeCompare(right.waId, 'en', { numeric: true });
+}
+
+function mergeContacts(existingContacts: Contact[], nextContacts: Contact[]) {
+  const byId = new Map<number, Contact>();
+  existingContacts.forEach((contact) => byId.set(contact.id, contact));
+  nextContacts.forEach((contact) => byId.set(contact.id, contact));
+  return Array.from(byId.values()).sort(compareContacts);
 }
 
 function ContactRowsSkeleton({ count = 8 }: { count?: number }) {
@@ -42,32 +73,79 @@ export function StartChatDialog({ open, onClose, onStartChat }: StartChatDialogP
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [startingId, setStartingId] = useState<number | null>(null);
   const [error, setError] = useState('');
+  const requestIdRef = useRef(0);
+  const lastLoadedSearchRef = useRef('');
+  const justOpenedRef = useRef(false);
+  const pageLoadingRef = useRef(false);
+
+  const loadContacts = useCallback(async (query: string, cursor: string | null, reset: boolean) => {
+    if (!reset && pageLoadingRef.current) return;
+
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+    pageLoadingRef.current = true;
+
+    if (reset) {
+      setContacts([]);
+      setNextCursor(null);
+      setLoading(true);
+      setLoadingMore(false);
+    } else {
+      setLoadingMore(true);
+    }
+
+    setError('');
+
+    try {
+      const page = await listContactsPage(query, CONTACT_FETCH_LIMIT, cursor);
+      if (requestId !== requestIdRef.current) return;
+
+      lastLoadedSearchRef.current = query;
+      setContacts((currentContacts) => (
+        reset ? [...page.items].sort(compareContacts) : mergeContacts(currentContacts, page.items)
+      ));
+      setNextCursor(page.nextCursor);
+    } catch (loadError) {
+      if (requestId !== requestIdRef.current) return;
+      setError(loadError instanceof Error ? loadError.message : 'Failed to load contacts');
+    } finally {
+      if (requestId !== requestIdRef.current) return;
+      pageLoadingRef.current = false;
+      setLoading(false);
+      setLoadingMore(false);
+    }
+  }, []);
 
   useEffect(() => {
     if (!open) return;
 
+    justOpenedRef.current = true;
     setSearch('');
     setError('');
-    setLoading(true);
-    void listContacts('', CONTACT_FETCH_LIMIT)
-      .then(setContacts)
-      .catch((loadError) => setError(loadError instanceof Error ? loadError.message : 'Failed to load contacts'))
-      .finally(() => setLoading(false));
-  }, [open]);
+    lastLoadedSearchRef.current = '';
+    void loadContacts('', null, true);
+  }, [loadContacts, open]);
 
-  const visibleContacts = useMemo(() => {
-    const query = search.trim().toLowerCase();
-    if (!query) return contacts;
+  useEffect(() => {
+    if (!open) return;
+    if (justOpenedRef.current) {
+      justOpenedRef.current = false;
+      return;
+    }
 
-    return contacts.filter((contact) => [
-      contact.profileName,
-      contact.businessDirectoryName,
-      contact.phoneNumber,
-      contact.waId,
-    ].filter(Boolean).join(' ').toLowerCase().includes(query));
-  }, [contacts, search]);
+    const query = search.trim();
+    if (query === lastLoadedSearchRef.current) return;
+
+    const debounce = window.setTimeout(() => {
+      void loadContacts(query, null, true);
+    }, query ? 220 : 0);
+
+    return () => window.clearTimeout(debounce);
+  }, [loadContacts, open, search]);
 
   async function handleStart(contact: Contact) {
     setStartingId(contact.id);
@@ -81,6 +159,16 @@ export function StartChatDialog({ open, onClose, onStartChat }: StartChatDialogP
     } finally {
       setStartingId(null);
     }
+  }
+
+  function handleContactListScroll(event: UIEvent<HTMLDivElement>) {
+    if (loading || loadingMore || !nextCursor) return;
+
+    const target = event.currentTarget;
+    const distanceToBottom = target.scrollHeight - target.scrollTop - target.clientHeight;
+    if (distanceToBottom > 180) return;
+
+    void loadContacts(lastLoadedSearchRef.current, nextCursor, false);
   }
 
   return (
@@ -109,10 +197,10 @@ export function StartChatDialog({ open, onClose, onStartChat }: StartChatDialogP
 
           {error && <div className="form-error">{error}</div>}
 
-          <div className="contact-dialog__list">
-            {loading && <ContactRowsSkeleton />}
+          <div className="contact-dialog__list" onScroll={handleContactListScroll}>
+            {loading && contacts.length === 0 && <ContactRowsSkeleton />}
 
-            {!loading && visibleContacts.map((contact) => (
+            {contacts.map((contact) => (
               <button
                 key={contact.id}
                 type="button"
@@ -131,7 +219,9 @@ export function StartChatDialog({ open, onClose, onStartChat }: StartChatDialogP
               </button>
             ))}
 
-            {!loading && visibleContacts.length === 0 && (
+            {loadingMore && <ContactRowsSkeleton count={4} />}
+
+            {!loading && contacts.length === 0 && (
               <div className="contact-picker-list__state">No contacts found.</div>
             )}
           </div>
