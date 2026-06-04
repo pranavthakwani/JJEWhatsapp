@@ -1,4 +1,9 @@
 import axios from 'axios';
+import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { env } from '../config/env.js';
 
 function buildBaseUrl(number) {
@@ -11,6 +16,10 @@ function buildHeaders(number) {
     'Content-Type': 'application/json',
   };
 }
+
+const BUSINESS_PROFILE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const BUSINESS_PROFILE_NEGATIVE_CACHE_TTL_MS = 10 * 60 * 1000;
+const businessProfileCache = new Map();
 
 function extractResponseMessageId(response) {
   return response?.data?.messages?.[0]?.id || null;
@@ -28,6 +37,72 @@ function wrapMetaError(error, fallback) {
   }
 
   return error;
+}
+
+function isWebmAudio(mimeType, fileName) {
+  const normalizedMime = String(mimeType || '').toLowerCase();
+  const normalizedName = String(fileName || '').toLowerCase();
+  return normalizedMime.includes('audio/webm') || normalizedName.endsWith('.webm');
+}
+
+function normalizeMediaMimeType(mimeType) {
+  const normalizedMime = String(mimeType || '').toLowerCase();
+  if (normalizedMime.includes('audio/ogg')) return 'audio/ogg';
+  if (normalizedMime.includes('audio/opus')) return 'audio/opus';
+  if (normalizedMime.includes('audio/mp4')) return 'audio/mp4';
+  if (normalizedMime.includes('audio/mpeg')) return 'audio/mpeg';
+  return mimeType;
+}
+
+function runFfmpeg(args) {
+  return new Promise((resolve, reject) => {
+    const ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
+    const child = spawn(ffmpegPath, args, {
+      windowsHide: true,
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    const errorChunks = [];
+
+    child.stderr.on('data', (chunk) => errorChunks.push(chunk));
+    child.on('error', (error) => {
+      reject(new Error(`ffmpeg could not start. Install ffmpeg on the server or set FFMPEG_PATH. ${error.message}`));
+    });
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      reject(new Error(`ffmpeg conversion failed with code ${code}: ${Buffer.concat(errorChunks).toString('utf8').slice(-1200)}`));
+    });
+  });
+}
+
+async function convertWebmAudioToOgg(buffer) {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'jjewa-audio-'));
+  const inputPath = path.join(tempDir, `${randomUUID()}.webm`);
+  const outputPath = path.join(tempDir, `${randomUUID()}.ogg`);
+
+  try {
+    await fs.writeFile(inputPath, buffer);
+    await runFfmpeg([
+      '-y',
+      '-i',
+      inputPath,
+      '-vn',
+      '-c:a',
+      'libopus',
+      '-b:a',
+      '32k',
+      '-ar',
+      '48000',
+      outputPath,
+    ]);
+
+    return await fs.readFile(outputPath);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
 }
 
 export async function sendTextMessage({ number, to, body, replyToWaMessageId }) {
@@ -114,10 +189,22 @@ export async function sendTemplateMessage({ number, to, templateName, languageCo
 }
 
 export async function uploadMedia({ number, buffer, mimeType, fileName }) {
+  let uploadBuffer = buffer;
+  let uploadMimeType = mimeType;
+  let uploadFileName = fileName;
+
+  if (isWebmAudio(mimeType, fileName)) {
+    uploadBuffer = await convertWebmAudioToOgg(Buffer.from(buffer));
+    uploadMimeType = 'audio/ogg';
+    uploadFileName = String(fileName || 'voice-note.webm').replace(/\.webm$/i, '.ogg');
+  } else {
+    uploadMimeType = normalizeMediaMimeType(uploadMimeType);
+  }
+
   const form = new FormData();
   form.append('messaging_product', 'whatsapp');
-  form.append('type', mimeType);
-  form.append('file', new Blob([buffer], { type: mimeType }), fileName);
+  form.append('type', uploadMimeType);
+  form.append('file', new Blob([uploadBuffer], { type: uploadMimeType }), uploadFileName);
 
   const response = await fetch(`${buildBaseUrl(number)}/${number.phoneNumberId}/media`, {
     method: 'POST',
@@ -133,7 +220,11 @@ export async function uploadMedia({ number, buffer, mimeType, fileName }) {
   }
 
   const data = await response.json();
-  return data.id;
+  return {
+    id: data.id,
+    mimeType: uploadMimeType,
+    fileName: uploadFileName,
+  };
 }
 
 export async function sendMediaMessage({ number, to, mediaType, mediaId, caption, fileName, replyToWaMessageId }) {
@@ -212,6 +303,42 @@ export async function listMessageTemplates(number) {
     return response.data.data || [];
   } catch (error) {
     throw wrapMetaError(error, 'Meta template sync failed');
+  }
+}
+
+export async function getBusinessProfile(number) {
+  const cacheKey = String(number.phoneNumberId || number.id || '');
+  const cached = businessProfileCache.get(cacheKey);
+  if (cached && Date.now() - cached.savedAt < cached.ttlMs) {
+    return cached.data;
+  }
+
+  try {
+    const response = await axios.get(
+      `${buildBaseUrl(number)}/${number.phoneNumberId}/whatsapp_business_profile`,
+      {
+        params: {
+          fields: 'profile_picture_url',
+        },
+        headers: buildHeaders(number),
+        timeout: 7000,
+      },
+    );
+
+    const profile = response.data?.data?.[0] || null;
+    businessProfileCache.set(cacheKey, {
+      savedAt: Date.now(),
+      ttlMs: BUSINESS_PROFILE_CACHE_TTL_MS,
+      data: profile,
+    });
+    return profile;
+  } catch (error) {
+    businessProfileCache.set(cacheKey, {
+      savedAt: Date.now(),
+      ttlMs: BUSINESS_PROFILE_NEGATIVE_CACHE_TTL_MS,
+      data: null,
+    });
+    throw wrapMetaError(error, 'Meta business profile fetch failed');
   }
 }
 

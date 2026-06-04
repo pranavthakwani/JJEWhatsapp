@@ -9,14 +9,19 @@ import {
   Clock3,
   Download,
   FileText,
+  Forward,
   Megaphone,
+  Mic,
   MoreVertical,
   Paperclip,
   Play,
+  Plus,
   Reply,
   Search,
   SendHorizonal,
   Smile,
+  Star,
+  Trash2,
   X,
 } from 'lucide-react';
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
@@ -26,6 +31,13 @@ import type { EmojiClickData } from 'emoji-picker-react';
 
 const EmojiPicker = lazy(() => import('emoji-picker-react'));
 const CUSTOMER_SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
+const COMPOSER_MAX_TEXTAREA_HEIGHT = 176;
+const VOICE_RECORDER_MIME_TYPES = [
+  'audio/ogg;codecs=opus',
+  'audio/mp4',
+  'audio/webm;codecs=opus',
+  'audio/webm',
+];
 
 type Props = {
   theme: 'dark' | 'light';
@@ -39,6 +51,9 @@ type Props = {
   onSendText: (text: string, replyToWaMessageId?: string | null) => Promise<void>;
   onSendAttachment: (file: File, caption: string, replyToWaMessageId?: string | null) => Promise<void>;
   onSendReaction: (message: Message, emoji: string) => Promise<void>;
+  onToggleStar: (message: Message) => Promise<void>;
+  onDeleteMessage: (message: Message) => Promise<void>;
+  onForwardMessage: (message: Message) => void;
   onSendOptInTemplate: (templateKind: 'auto' | 'intro' | 'followup') => Promise<void>;
   onToggleMute: () => void;
   onBack?: () => void;
@@ -53,6 +68,8 @@ type MediaViewerState = {
 };
 
 const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '🙏'];
+
+const REACTION_SHORTCUTS = ['\u{1F44D}', '\u2764\uFE0F', '\u{1F602}', '\u{1F62E}', '\u{1F622}', '\u{1F64F}'];
 
 function formatBubbleTime(value: string | null) {
   if (!value) return '';
@@ -76,6 +93,44 @@ function formatDateLabel(value: string) {
     month: 'long',
     year: current.getFullYear() === today.getFullYear() ? undefined : 'numeric',
   });
+}
+
+function formatVoiceDuration(durationMs: number) {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+}
+
+function getSupportedVoiceMimeType() {
+  if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') {
+    return '';
+  }
+
+  return VOICE_RECORDER_MIME_TYPES.find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) || '';
+}
+
+function getAudioExtension(mimeType: string) {
+  const normalized = mimeType.toLowerCase();
+  if (normalized.includes('ogg')) return 'ogg';
+  if (normalized.includes('mp4')) return 'm4a';
+  if (normalized.includes('mpeg')) return 'mp3';
+  if (normalized.includes('webm')) return 'webm';
+  return 'ogg';
+}
+
+function shouldSubmitOnEnter() {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return true;
+  return window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+}
+
+function resizeComposerTextarea(textarea: HTMLTextAreaElement | null) {
+  if (!textarea) return;
+
+  textarea.style.height = 'auto';
+  const nextHeight = Math.min(textarea.scrollHeight, COMPOSER_MAX_TEXTAREA_HEIGHT);
+  textarea.style.height = `${nextHeight}px`;
+  textarea.style.overflowY = textarea.scrollHeight > COMPOSER_MAX_TEXTAREA_HEIGHT ? 'auto' : 'hidden';
 }
 
 function normalizeForSearch(message: Message) {
@@ -410,6 +465,9 @@ export function ChatWindow({
   onSendText,
   onSendAttachment,
   onSendReaction,
+  onToggleStar,
+  onDeleteMessage,
+  onForwardMessage,
   onSendOptInTemplate,
   onToggleMute,
   onBack,
@@ -424,10 +482,17 @@ export function ChatWindow({
   const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
   const [viewer, setViewer] = useState<MediaViewerState | null>(null);
   const [reactionTargetWaId, setReactionTargetWaId] = useState<string | null>(null);
+  const [reactionLibraryWaId, setReactionLibraryWaId] = useState<string | null>(null);
   const [composerPreviewUrl, setComposerPreviewUrl] = useState<string | null>(null);
   const [jumpHighlightId, setJumpHighlightId] = useState<number | null>(null);
   const [optInSendingKind, setOptInSendingKind] = useState<'intro' | 'followup' | null>(null);
   const [optInError, setOptInError] = useState('');
+  const [actionMessage, setActionMessage] = useState<Message | null>(null);
+  const [deleteConfirmMessage, setDeleteConfirmMessage] = useState<Message | null>(null);
+  const [voiceMode, setVoiceMode] = useState<'idle' | 'recording' | 'review'>('idle');
+  const [voiceDurationMs, setVoiceDurationMs] = useState(0);
+  const [voiceChunkCount, setVoiceChunkCount] = useState(0);
+  const [voiceError, setVoiceError] = useState('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const messagesViewportRef = useRef<HTMLDivElement | null>(null);
@@ -439,6 +504,14 @@ export function ChatWindow({
   const pendingOlderScrollRestoreRef = useRef<{ scrollTop: number; scrollHeight: number } | null>(null);
   const olderLoadRequestRef = useRef(false);
   const jumpHighlightTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const messageLongPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const voiceHoldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const voiceTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const voiceRecorderRef = useRef<MediaRecorder | null>(null);
+  const voiceStreamRef = useRef<MediaStream | null>(null);
+  const voiceChunksRef = useRef<Blob[]>([]);
+  const voiceStartedAtRef = useRef(0);
+  const voiceAccumulatedMsRef = useRef(0);
 
   const headerSubtitle = useMemo(() => {
     if (!conversation) return '';
@@ -490,11 +563,22 @@ export function ChatWindow({
   );
 
   const reactionMap = useMemo(() => {
-    const next = new Map<string, Array<{ emoji: string; count: number }>>();
+    const latestByActor = new Map<string, Message>();
 
     for (const message of messages) {
-      if (message.messageType !== 'reaction' || !message.parentWaMessageId || !message.textBody) continue;
+      if (message.deletedAt || message.messageType !== 'reaction' || !message.parentWaMessageId || !message.textBody) continue;
 
+      const actorKey = `${message.parentWaMessageId}:${message.direction}:${message.contactId}`;
+      const existing = latestByActor.get(actorKey);
+      if (!existing || new Date(message.createdAt).getTime() >= new Date(existing.createdAt).getTime()) {
+        latestByActor.set(actorKey, message);
+      }
+    }
+
+    const next = new Map<string, Array<{ emoji: string; count: number }>>();
+
+    for (const message of latestByActor.values()) {
+      if (!message.parentWaMessageId || !message.textBody) continue;
       const grouped = next.get(message.parentWaMessageId) || [];
       const existing = grouped.find((item) => item.emoji === message.textBody);
       if (existing) {
@@ -502,10 +586,25 @@ export function ChatWindow({
       } else {
         grouped.push({ emoji: message.textBody, count: 1 });
       }
-      next.set(message.parentWaMessageId, grouped);
+      next.set(message.parentWaMessageId, grouped.slice(0, 3));
     }
 
     return next;
+  }, [messages]);
+
+  const outboundReactionByMessageId = useMemo(() => {
+    const latest = new Map<string, Message>();
+
+    for (const message of messages) {
+      if (message.deletedAt || message.messageType !== 'reaction' || message.direction !== 'outbound' || !message.parentWaMessageId) continue;
+
+      const existing = latest.get(message.parentWaMessageId);
+      if (!existing || new Date(message.createdAt).getTime() >= new Date(existing.createdAt).getTime()) {
+        latest.set(message.parentWaMessageId, message);
+      }
+    }
+
+    return latest;
   }, [messages]);
 
   const timeline = useMemo(() => {
@@ -605,6 +704,19 @@ export function ChatWindow({
     if (jumpHighlightTimeoutRef.current) {
       clearTimeout(jumpHighlightTimeoutRef.current);
     }
+    if (messageLongPressTimerRef.current) {
+      clearTimeout(messageLongPressTimerRef.current);
+    }
+    if (voiceHoldTimerRef.current) {
+      clearTimeout(voiceHoldTimerRef.current);
+    }
+    if (voiceTimerRef.current) {
+      clearInterval(voiceTimerRef.current);
+    }
+    if (voiceRecorderRef.current?.state === 'recording') {
+      voiceRecorderRef.current.stop();
+    }
+    voiceStreamRef.current?.getTracks().forEach((track) => track.stop());
   }, []);
 
   useEffect(() => {
@@ -621,6 +733,7 @@ export function ChatWindow({
 
       if (!(target instanceof HTMLElement && target.closest('.bubble'))) {
         setReactionTargetWaId(null);
+        setReactionLibraryWaId(null);
       }
     }
 
@@ -657,8 +770,15 @@ export function ChatWindow({
   }, [file]);
 
   useEffect(() => {
+    resizeComposerTextarea(textareaRef.current);
+  }, [draft, file, replyTarget, isNormalChatLocked]);
+
+  useEffect(() => {
     setReplyTarget(null);
     setReactionTargetWaId(null);
+    setReactionLibraryWaId(null);
+    setActionMessage(null);
+    setDeleteConfirmMessage(null);
   }, [conversation?.id]);
 
   function handleDownloadMedia() {
@@ -735,11 +855,172 @@ export function ChatWindow({
   }
 
   async function handleReactionClick(message: Message, emoji: string) {
+    const currentReaction = message.waMessageId ? outboundReactionByMessageId.get(message.waMessageId)?.textBody : null;
+    const nextReaction = currentReaction === emoji ? '' : emoji;
+
     setReactionTargetWaId(null);
+    setReactionLibraryWaId(null);
     try {
-      await onSendReaction(message, emoji);
+      await onSendReaction(message, nextReaction);
     } catch {
       // non-blocking
+    }
+  }
+
+  function handleReactionEmojiClick(message: Message, emojiData: EmojiClickData) {
+    void handleReactionClick(message, emojiData.emoji);
+  }
+
+  function clearMessageLongPressTimer() {
+    if (messageLongPressTimerRef.current) {
+      clearTimeout(messageLongPressTimerRef.current);
+      messageLongPressTimerRef.current = null;
+    }
+  }
+
+  function handleMessagePressStart(message: Message) {
+    clearMessageLongPressTimer();
+    messageLongPressTimerRef.current = setTimeout(() => {
+      if (message.waMessageId) {
+        setReactionTargetWaId(message.waMessageId);
+        setReactionLibraryWaId(null);
+        setActionMessage(null);
+        return;
+      }
+
+      setActionMessage(message);
+      setReactionTargetWaId(null);
+    }, 600);
+  }
+
+  function handleMessagePressEnd() {
+    clearMessageLongPressTimer();
+  }
+
+  function clearVoiceTimer() {
+    if (voiceTimerRef.current) {
+      clearInterval(voiceTimerRef.current);
+      voiceTimerRef.current = null;
+    }
+  }
+
+  function stopVoiceStream() {
+    voiceStreamRef.current?.getTracks().forEach((track) => track.stop());
+    voiceStreamRef.current = null;
+  }
+
+  async function startVoiceRecording() {
+    if (isNormalChatLocked || voiceMode === 'recording') return;
+
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      setVoiceError('Voice recording is not supported in this browser.');
+      return;
+    }
+
+    setVoiceError('');
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const supportedMimeType = getSupportedVoiceMimeType();
+      const recorder = new MediaRecorder(stream, supportedMimeType ? { mimeType: supportedMimeType } : undefined);
+      voiceStreamRef.current = stream;
+      voiceRecorderRef.current = recorder;
+
+      recorder.addEventListener('dataavailable', (event) => {
+        if (event.data.size > 0) {
+          voiceChunksRef.current.push(event.data);
+          setVoiceChunkCount(voiceChunksRef.current.length);
+        }
+      });
+
+      recorder.addEventListener('stop', stopVoiceStream, { once: true });
+      voiceStartedAtRef.current = Date.now();
+      recorder.start();
+      setVoiceMode('recording');
+      clearVoiceTimer();
+      voiceTimerRef.current = setInterval(() => {
+        setVoiceDurationMs(voiceAccumulatedMsRef.current + Date.now() - voiceStartedAtRef.current);
+      }, 250);
+    } catch (error) {
+      stopVoiceStream();
+      setVoiceError(error instanceof Error ? error.message : 'Could not start recording');
+      setVoiceMode(voiceChunksRef.current.length > 0 ? 'review' : 'idle');
+    }
+  }
+
+  function pauseVoiceRecordingForReview() {
+    if (voiceRecorderRef.current?.state !== 'recording') return;
+
+    voiceAccumulatedMsRef.current += Date.now() - voiceStartedAtRef.current;
+    setVoiceDurationMs(voiceAccumulatedMsRef.current);
+    clearVoiceTimer();
+    voiceRecorderRef.current.stop();
+    voiceRecorderRef.current = null;
+    setVoiceMode('review');
+  }
+
+  function clearVoiceRecording() {
+    if (voiceRecorderRef.current?.state === 'recording') {
+      voiceRecorderRef.current.stop();
+    }
+    clearVoiceTimer();
+    stopVoiceStream();
+    voiceRecorderRef.current = null;
+    voiceChunksRef.current = [];
+    setVoiceChunkCount(0);
+    voiceAccumulatedMsRef.current = 0;
+    voiceStartedAtRef.current = 0;
+    setVoiceDurationMs(0);
+    setVoiceMode('idle');
+    setVoiceError('');
+  }
+
+  function handleMicPointerDown() {
+    if (isNormalChatLocked || file || draft.trim()) return;
+
+    if (voiceHoldTimerRef.current) {
+      clearTimeout(voiceHoldTimerRef.current);
+    }
+
+    voiceHoldTimerRef.current = setTimeout(() => {
+      voiceHoldTimerRef.current = null;
+      void startVoiceRecording();
+    }, 500);
+  }
+
+  function handleMicPointerEnd() {
+    if (voiceHoldTimerRef.current) {
+      clearTimeout(voiceHoldTimerRef.current);
+      voiceHoldTimerRef.current = null;
+      return;
+    }
+
+    pauseVoiceRecordingForReview();
+  }
+
+  async function sendVoiceRecording() {
+    if (voiceMode === 'recording') {
+      pauseVoiceRecordingForReview();
+    }
+
+    if (voiceChunksRef.current.length === 0) return;
+
+    const mimeType = voiceChunksRef.current[0]?.type || 'audio/ogg';
+    const extension = getAudioExtension(mimeType);
+    const voiceFile = new File(
+      voiceChunksRef.current,
+      `voice-note-${Date.now()}.${extension}`,
+      { type: mimeType },
+    );
+    const voiceReplyTarget = replyTarget;
+
+    clearVoiceRecording();
+    setReplyTarget(null);
+
+    try {
+      await onSendAttachment(voiceFile, '', voiceReplyTarget?.waMessageId || null);
+    } catch {
+      setReplyTarget(voiceReplyTarget);
     }
   }
 
@@ -772,7 +1053,7 @@ export function ChatWindow({
     setOptInSendingKind(recommendedTemplateKind);
     setOptInError('');
     try {
-      await onSendOptInTemplate('auto');
+      await onSendOptInTemplate(recommendedTemplateKind);
     } catch (error) {
       setOptInError(error instanceof Error ? error.message : 'Failed to send template');
     } finally {
@@ -928,7 +1209,20 @@ export function ChatWindow({
               className={`message-row message-row--${item.message.direction} ${jumpHighlightId === item.message.id ? 'message-row--jump-active' : ''}`}
             >
               <div
-                className={`bubble ${item.message.direction === 'outbound' ? 'bubble--outbound' : 'bubble--inbound'} ${isMediaLikeMessage(item.message) ? 'bubble--media-message' : ''} ${searchMatches[activeMatchIndex] === item.message.id ? 'bubble--search-active' : ''}`}
+                className={`bubble ${item.message.direction === 'outbound' ? 'bubble--outbound' : 'bubble--inbound'} ${isMediaLikeMessage(item.message) ? 'bubble--media-message' : ''} ${item.message.waMessageId && reactionMap.get(item.message.waMessageId)?.length ? 'bubble--has-reactions' : ''} ${searchMatches[activeMatchIndex] === item.message.id ? 'bubble--search-active' : ''}`}
+                onPointerDown={(event) => {
+                  if ((event.target as HTMLElement).closest('button, a, input, textarea')) return;
+                  handleMessagePressStart(item.message);
+                }}
+                onPointerUp={handleMessagePressEnd}
+                onPointerCancel={handleMessagePressEnd}
+                onPointerLeave={handleMessagePressEnd}
+                onDoubleClick={() => {
+                  if (item.message.waMessageId) {
+                    setReactionTargetWaId(item.message.waMessageId);
+                    setReactionLibraryWaId(null);
+                  }
+                }}
               >
                 {item.message.parentWaMessageId && (() => {
                   const quotedMessage = messageByWaId.get(item.message.parentWaMessageId) || null;
@@ -947,7 +1241,10 @@ export function ChatWindow({
                       type="button"
                       className="bubble__action-button"
                       title="React"
-                      onClick={() => setReactionTargetWaId((current) => current === item.message.waMessageId ? null : item.message.waMessageId)}
+                      onClick={() => {
+                        setReactionLibraryWaId(null);
+                        setReactionTargetWaId((current) => current === item.message.waMessageId ? null : item.message.waMessageId);
+                      }}
                     >
                       <Smile size={14} />
                     </button>
@@ -962,20 +1259,66 @@ export function ChatWindow({
                     >
                       <Reply size={14} />
                     </button>
+                    <button
+                      type="button"
+                      className="bubble__action-button"
+                      title={item.message.starredAt ? 'Unstar' : 'Star'}
+                      onClick={() => void onToggleStar(item.message)}
+                    >
+                      <Star size={14} className={item.message.starredAt ? 'is-starred' : ''} />
+                    </button>
+                    <button
+                      type="button"
+                      className="bubble__action-button"
+                      title="Forward"
+                      onClick={() => onForwardMessage(item.message)}
+                    >
+                      <Forward size={14} />
+                    </button>
                   </div>
                 )}
                 {reactionTargetWaId === item.message.waMessageId && (
-                  <div className="bubble__reaction-picker">
-                    {QUICK_REACTIONS.map((emoji) => (
+                  <div className={`bubble__reaction-picker ${reactionLibraryWaId === item.message.waMessageId ? 'is-expanded' : ''}`}>
+                    <div className="bubble__reaction-row">
+                      {REACTION_SHORTCUTS.map((emoji) => (
+                        <button
+                          key={emoji}
+                          type="button"
+                          className="bubble__reaction-option"
+                          onClick={() => void handleReactionClick(item.message, emoji)}
+                        >
+                          {emoji}
+                        </button>
+                      ))}
                       <button
-                        key={emoji}
                         type="button"
-                        className="bubble__reaction-option"
-                        onClick={() => void handleReactionClick(item.message, emoji)}
+                        className="bubble__reaction-option bubble__reaction-option--icon"
+                        title="More reactions"
+                        onClick={() => setReactionLibraryWaId((current) => (
+                          current === item.message.waMessageId ? null : item.message.waMessageId
+                        ))}
                       >
-                        {emoji}
+                        <Plus size={17} />
                       </button>
-                    ))}
+                    </div>
+                    {reactionLibraryWaId === item.message.waMessageId && (
+                      <div className="bubble__reaction-library">
+                        <Suspense fallback={<div className="emoji-picker-loading"><span className="skeleton-line skeleton-line--wide" /></div>}>
+                          <EmojiPicker
+                            open
+                            onEmojiClick={(emojiData) => handleReactionEmojiClick(item.message, emojiData)}
+                            theme={theme}
+                            emojiStyle="native"
+                            lazyLoadEmojis
+                            width={320}
+                            height={360}
+                            autoFocusSearch={false}
+                            searchPlaceholder="Search reaction"
+                            previewConfig={{ showPreview: false }}
+                          />
+                        </Suspense>
+                      </div>
+                    )}
                   </div>
                 )}
                 <div className="bubble__content">{renderBody(item.message, searchQuery, setViewer)}</div>
@@ -990,6 +1333,9 @@ export function ChatWindow({
                   </div>
                 ) : null}
                 <div className="bubble__meta">
+                  {item.message.starredAt && (
+                    <Star size={11} className="bubble__star-icon" aria-label="Starred message" />
+                  )}
                   {item.message.campaignId && (
                     <Megaphone size={12} className="bubble__broadcast-icon" aria-label="Broadcast message" />
                   )}
@@ -1044,6 +1390,30 @@ export function ChatWindow({
           </div>
         )}
 
+        {(voiceMode !== 'idle' || voiceError) && (
+          <div className={`composer__voice-review ${voiceMode === 'recording' ? 'is-recording' : ''}`}>
+            <div className="composer__voice-pulse">
+              <Mic size={16} />
+            </div>
+            <div className="composer__voice-copy">
+              <strong>{voiceMode === 'recording' ? 'Recording...' : 'Voice note paused'}</strong>
+              <span>{voiceError || `${formatVoiceDuration(voiceDurationMs)} recorded. Hold mic again to add more.`}</span>
+            </div>
+            <button type="button" className="composer__voice-clear" onClick={clearVoiceRecording}>
+              <Trash2 size={16} />
+              <span>Cancel</span>
+            </button>
+            <button
+              type="button"
+              className="composer__voice-send"
+              onClick={() => void sendVoiceRecording()}
+              disabled={voiceChunkCount === 0}
+            >
+              Send
+            </button>
+          </div>
+        )}
+
         <div className="composer">
           <div ref={emojiRef} className="composer__emoji-anchor">
             <button
@@ -1094,18 +1464,132 @@ export function ChatWindow({
             disabled={isNormalChatLocked}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey) {
+              if (event.key === 'Enter' && !event.shiftKey && shouldSubmitOnEnter()) {
                 event.preventDefault();
                 void handleSubmit();
               }
             }}
           />
 
-          <button type="button" className="composer__send" onClick={() => void handleSubmit()} disabled={sending || isNormalChatLocked}>
-            <SendHorizonal size={18} />
-          </button>
+          {draft.trim() || file ? (
+            <button type="button" className="composer__send" onClick={() => void handleSubmit()} disabled={sending || isNormalChatLocked}>
+              <SendHorizonal size={18} />
+            </button>
+          ) : (
+            <button
+              type="button"
+              className={`composer__send composer__mic ${voiceMode === 'recording' ? 'is-recording' : ''}`}
+              onPointerDown={handleMicPointerDown}
+              onPointerUp={handleMicPointerEnd}
+              onPointerCancel={handleMicPointerEnd}
+              onPointerLeave={voiceMode === 'recording' ? handleMicPointerEnd : undefined}
+              disabled={sending || isNormalChatLocked}
+              title={voiceMode === 'review' ? 'Hold to continue recording' : 'Hold to record voice note'}
+            >
+              <Mic size={18} />
+            </button>
+          )}
         </div>
       </footer>
+
+      <div className={`dialog-layer message-action-layer ${actionMessage ? 'is-open' : ''}`} aria-hidden={!actionMessage}>
+        <div
+          className="dialog-layer__backdrop"
+          onClick={() => {
+            setDeleteConfirmMessage(null);
+            setActionMessage(null);
+          }}
+        />
+        <section className="message-action-sheet frosted-panel" role="dialog" aria-modal="true">
+          <header className="message-action-sheet__header">
+            <div>
+              <span className="bottom-sheet__eyebrow">Message</span>
+              <h2>{deleteConfirmMessage ? 'Delete message?' : actionMessage ? getMessagePreviewCopy(actionMessage) : ''}</h2>
+            </div>
+            <button
+              type="button"
+              className="toolbar-icon-button"
+              onClick={() => {
+                setDeleteConfirmMessage(null);
+                setActionMessage(null);
+              }}
+              title="Close"
+            >
+              <X size={18} />
+            </button>
+          </header>
+
+          {actionMessage && deleteConfirmMessage && (
+            <>
+              <div className="message-action-sheet__warning">
+                This removes the message from this app only. WhatsApp Cloud API cannot delete an already-sent message from the customer phone.
+              </div>
+              <div className="chat-action-sheet__confirm">
+                <button type="button" className="ghost-button" onClick={() => setDeleteConfirmMessage(null)}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="danger-button"
+                  onClick={() => {
+                    void onDeleteMessage(deleteConfirmMessage);
+                    setDeleteConfirmMessage(null);
+                    setActionMessage(null);
+                  }}
+                >
+                  Delete
+                </button>
+              </div>
+            </>
+          )}
+
+          {actionMessage && !deleteConfirmMessage && (
+            <div className="message-action-sheet__actions">
+              {actionMessage.waMessageId && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReplyTarget(actionMessage);
+                    setActionMessage(null);
+                    textareaRef.current?.focus();
+                  }}
+                >
+                  <Reply size={18} />
+                  <span>Reply</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  onForwardMessage(actionMessage);
+                  setActionMessage(null);
+                }}
+              >
+                <Forward size={18} />
+                <span>Forward</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void onToggleStar(actionMessage);
+                  setActionMessage(null);
+                }}
+              >
+                <Star size={18} className={actionMessage.starredAt ? 'is-starred' : ''} />
+                <span>{actionMessage.starredAt ? 'Unstar message' : 'Star message'}</span>
+              </button>
+              <button
+                type="button"
+                className="is-danger"
+                onClick={() => setDeleteConfirmMessage(actionMessage)}
+              >
+                <Trash2 size={18} />
+                <span>Delete message</span>
+              </button>
+            </div>
+          )}
+        </section>
+      </div>
 
       {viewer && (
         <div className="media-viewer" role="dialog" aria-modal="true">

@@ -1,7 +1,7 @@
 import { Check, Search, UserPlus, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { UIEvent } from 'react';
-import { createContact, listContactsPage } from '../lib/api';
+import { createContact, getCachedContactsPage, listContactsPage } from '../lib/api';
 import type { Contact } from '../types';
 
 const CONTACT_FETCH_LIMIT = 300;
@@ -92,8 +92,16 @@ export function StartChatDialog({ open, onClose, onStartChat }: StartChatDialogP
     if (reset) {
       setContacts([]);
       setNextCursor(null);
-      setLoading(true);
       setLoadingMore(false);
+
+      const cachedPage = getCachedContactsPage(query, CONTACT_FETCH_LIMIT, null);
+      if (cachedPage) {
+        setContacts([...cachedPage.items].sort(compareContacts));
+        setNextCursor(cachedPage.nextCursor);
+        setLoading(false);
+      } else {
+        setLoading(true);
+      }
     } else {
       setLoadingMore(true);
     }

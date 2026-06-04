@@ -1,5 +1,5 @@
 import * as repo from './chatRepository.js';
-import { sendTemplateMessage, sendTextMessage } from './metaCloudService.js';
+import { sendMediaMessage, sendTemplateMessage, sendTextMessage } from './metaCloudService.js';
 import { logger } from '../utils/logger.js';
 
 function hasOpenCustomerWindow(contact) {
@@ -12,7 +12,71 @@ function shouldSendFollowupOptInTemplate(contact) {
   return ['pending_initial', 'pending_followup', 'opted_in'].includes(contact?.optInStatus);
 }
 
-async function processRecipient(number, campaign, recipient, io) {
+function isMediaCampaign(campaign) {
+  return ['image', 'video', 'audio', 'document'].includes(campaign.mode);
+}
+
+function isApprovedTemplate(template) {
+  return String(template?.status || '').toLowerCase() === 'approved';
+}
+
+function resolveTemplateLanguage(campaign, templates, templateName) {
+  const template = templates.find((item) => item.templateName === templateName && isApprovedTemplate(item))
+    || templates.find((item) => item.templateName === templateName);
+
+  return template?.language || campaign.templateLanguage || process.env.OPT_IN_TEMPLATE_LANGUAGE || 'en';
+}
+
+function getCampaignMessagePayload(campaign, templateLanguage = campaign.templateLanguage) {
+  if (campaign.mode === 'template') {
+    return {
+      messageType: 'template',
+      templateName: campaign.templateName,
+      templateLanguage,
+      templateParams: campaign.templateParams,
+      campaignId: campaign.id,
+    };
+  }
+
+  if (isMediaCampaign(campaign)) {
+    return {
+      messageType: campaign.mode,
+      textBody: null,
+      caption: campaign.bodyText || null,
+      mediaId: campaign.mediaId,
+      mimeType: campaign.mimeType,
+      fileName: campaign.fileName,
+      campaignId: campaign.id,
+    };
+  }
+
+  return {
+    messageType: 'text',
+    textBody: campaign.bodyText,
+    campaignId: campaign.id,
+  };
+}
+
+async function sendCampaignMessage({ number, campaign, to }) {
+  if (isMediaCampaign(campaign)) {
+    return sendMediaMessage({
+      number,
+      to,
+      mediaType: campaign.mode,
+      mediaId: campaign.mediaId,
+      caption: campaign.mode === 'audio' ? null : campaign.bodyText,
+      fileName: campaign.fileName,
+    });
+  }
+
+  return sendTextMessage({
+    number,
+    to,
+    body: campaign.bodyText,
+  });
+}
+
+async function processRecipient(number, campaign, recipient, io, templates = []) {
   const contact = await repo.upsertContact({
     waId: recipient.recipientWaId,
     phoneNumber: recipient.recipientWaId,
@@ -23,6 +87,8 @@ async function processRecipient(number, campaign, recipient, io) {
   const conversationId = await repo.ensureConversation(number.id, contact.id);
 
   let sendResult;
+  let sentTemplateLanguage = campaign.templateLanguage;
+
   if (campaign.mode === 'template') {
     const components = Array.isArray(campaign.templateParams) && campaign.templateParams.length > 0
       ? [
@@ -36,19 +102,20 @@ async function processRecipient(number, campaign, recipient, io) {
         ]
       : [];
 
+    sentTemplateLanguage = resolveTemplateLanguage(campaign, templates, campaign.templateName);
     sendResult = await sendTemplateMessage({
       number,
       to: recipient.recipientWaId,
       templateName: campaign.templateName,
-      languageCode: campaign.templateLanguage || 'en',
+      languageCode: sentTemplateLanguage,
       components,
     });
   } else {
-    if (contact.optInStatus === 'opted_in' && hasOpenCustomerWindow(contact)) {
-      sendResult = await sendTextMessage({
+    if (hasOpenCustomerWindow(contact)) {
+      sendResult = await sendCampaignMessage({
         number,
         to: recipient.recipientWaId,
-        body: campaign.bodyText,
+        campaign,
       });
     } else {
       const shouldUseFollowup = shouldSendFollowupOptInTemplate(contact);
@@ -60,11 +127,12 @@ async function processRecipient(number, campaign, recipient, io) {
         throw new Error('No opt-in template configured for this broadcast.');
       }
 
+      sentTemplateLanguage = resolveTemplateLanguage(campaign, templates, templateName);
       sendResult = await sendTemplateMessage({
         number,
         to: recipient.recipientWaId,
         templateName,
-        languageCode: campaign.templateLanguage || 'en',
+        languageCode: sentTemplateLanguage,
         components: [],
       });
 
@@ -76,7 +144,7 @@ async function processRecipient(number, campaign, recipient, io) {
         payload: {
           messageType: 'template',
           templateName,
-          templateLanguage: campaign.templateLanguage,
+          templateLanguage: sentTemplateLanguage,
           campaignId: campaign.id,
         },
       });
@@ -87,6 +155,7 @@ async function processRecipient(number, campaign, recipient, io) {
         recipientId: recipient.id,
         contactId: contact.id,
         conversationId,
+        waMessageId: promptMessage.waMessageId,
         promptTemplateName: templateName,
         nextStatus,
         requestedAt: new Date(),
@@ -112,12 +181,7 @@ async function processRecipient(number, campaign, recipient, io) {
     contactId: contact.id,
     responseMessageId: sendResult.messageId,
     payload: {
-      messageType: campaign.mode === 'template' ? 'template' : 'text',
-      textBody: campaign.bodyText,
-      templateName: campaign.templateName,
-      templateLanguage: campaign.templateLanguage,
-      templateParams: campaign.templateParams,
-      campaignId: campaign.id,
+      ...getCampaignMessagePayload(campaign, sentTemplateLanguage),
     },
   });
 
@@ -148,11 +212,12 @@ export function startCampaignDispatcher(io, intervalMs = 3000) {
         if (!number) continue;
 
         await repo.markCampaignSending(campaign.id);
+        const templates = await repo.listTemplates(number.id);
         const recipients = await repo.getQueuedCampaignRecipients(campaign.id, 12);
 
         for (const recipient of recipients) {
           try {
-            await processRecipient(number, campaign, recipient, io);
+            await processRecipient(number, campaign, recipient, io, templates);
           } catch (error) {
             logger.error('Campaign recipient send failed', {
               campaignId: campaign.id,

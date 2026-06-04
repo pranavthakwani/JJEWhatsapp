@@ -1,6 +1,7 @@
 import { Check, Search, Users, X } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
-import { createContactList, listContacts } from '../lib/api';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { UIEvent } from 'react';
+import { createContactList, listContactsPage } from '../lib/api';
 import type { BusinessNumber, Contact, ContactList } from '../types';
 
 type RecipientDraft = {
@@ -20,7 +21,7 @@ type Props = {
   onCreateContactList: (payload: { phoneNumberId: number; list: ContactList }) => Promise<void>;
 };
 
-const CONTACT_FETCH_LIMIT = 50000;
+const CONTACT_FETCH_LIMIT = 300;
 
 function businessLabel() {
   return 'Jay Jalaram Enterprise';
@@ -66,6 +67,36 @@ function getContactName(contact: Contact) {
   return contact.profileName || contact.businessDirectoryName || contact.phoneNumber || contact.waId;
 }
 
+function isAlphabeticContact(contact: Contact) {
+  return /^[a-z]/i.test(getContactName(contact).trim());
+}
+
+function compareContacts(left: Contact, right: Contact) {
+  const leftName = getContactName(left).trim();
+  const rightName = getContactName(right).trim();
+  const leftIsAlpha = isAlphabeticContact(left);
+  const rightIsAlpha = isAlphabeticContact(right);
+
+  if (leftIsAlpha !== rightIsAlpha) {
+    return leftIsAlpha ? -1 : 1;
+  }
+
+  const nameCompare = leftName.localeCompare(rightName, 'en', {
+    numeric: true,
+    sensitivity: 'base',
+  });
+
+  if (nameCompare !== 0) return nameCompare;
+  return left.waId.localeCompare(right.waId, 'en', { numeric: true });
+}
+
+function mergeContacts(existingContacts: Contact[], nextContacts: Contact[]) {
+  const byId = new Map<number, Contact>();
+  existingContacts.forEach((contact) => byId.set(contact.id, contact));
+  nextContacts.forEach((contact) => byId.set(contact.id, contact));
+  return Array.from(byId.values()).sort(compareContacts);
+}
+
 function buildContactRecipient(contact: Contact): RecipientDraft {
   return {
     key: `contact:${contact.id}`,
@@ -90,49 +121,85 @@ export function CampaignComposer({
   const [allContacts, setAllContacts] = useState<Contact[]>([]);
   const [selectedRecipients, setSelectedRecipients] = useState<RecipientDraft[]>([]);
   const [loadingContacts, setLoadingContacts] = useState(false);
+  const [loadingMoreContacts, setLoadingMoreContacts] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [savingList, setSavingList] = useState(false);
   const [error, setError] = useState('');
+  const requestIdRef = useRef(0);
+  const lastLoadedSearchRef = useRef('');
+  const justOpenedRef = useRef(false);
+  const pageLoadingRef = useRef(false);
 
-  async function loadContacts() {
-    setLoadingContacts(true);
-    try {
-      setAllContacts(await listContacts('', CONTACT_FETCH_LIMIT));
-    } finally {
-      setLoadingContacts(false);
+  const loadContacts = useCallback(async (query: string, cursor: string | null, reset: boolean) => {
+    if (!reset && pageLoadingRef.current) return;
+
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+    pageLoadingRef.current = true;
+
+    if (reset) {
+      setAllContacts([]);
+      setNextCursor(null);
+      setLoadingContacts(true);
+      setLoadingMoreContacts(false);
+    } else {
+      setLoadingMoreContacts(true);
     }
-  }
+
+    try {
+      const page = await listContactsPage(query, CONTACT_FETCH_LIMIT, cursor);
+      if (requestId !== requestIdRef.current) return;
+
+      lastLoadedSearchRef.current = query;
+      setAllContacts((currentContacts) => (
+        reset ? [...page.items].sort(compareContacts) : mergeContacts(currentContacts, page.items)
+      ));
+      setNextCursor(page.nextCursor);
+    } catch (loadError) {
+      if (requestId !== requestIdRef.current) return;
+      setError(loadError instanceof Error ? loadError.message : 'Failed to load contacts');
+    } finally {
+      if (requestId !== requestIdRef.current) return;
+      pageLoadingRef.current = false;
+      setLoadingContacts(false);
+      setLoadingMoreContacts(false);
+    }
+  }, []);
 
   useEffect(() => {
     if (!open) return;
 
+    justOpenedRef.current = true;
     setPhoneNumberId(defaultPhoneNumberId);
     setListName('');
     setContactSearch('');
+    setAllContacts([]);
     setSelectedRecipients([]);
     setError('');
+    lastLoadedSearchRef.current = '';
 
-    void loadContacts().catch((loadError) => {
-      setError(loadError instanceof Error ? loadError.message : 'Failed to load contacts');
-    });
-  }, [defaultPhoneNumberId, open]);
+    void loadContacts('', null, true);
+  }, [defaultPhoneNumberId, loadContacts, open]);
+
+  useEffect(() => {
+    if (!open) return;
+    if (justOpenedRef.current) {
+      justOpenedRef.current = false;
+      return;
+    }
+
+    const query = contactSearch.trim();
+    if (query === lastLoadedSearchRef.current) return;
+
+    const debounce = window.setTimeout(() => {
+      void loadContacts(query, null, true);
+    }, query ? 220 : 0);
+
+    return () => window.clearTimeout(debounce);
+  }, [contactSearch, loadContacts, open]);
 
   const visibleContacts = useMemo(() => {
-    const query = contactSearch.trim().toLowerCase();
-    if (!query) return allContacts;
-
-    return allContacts.filter((contact) => {
-      const candidate = [
-        contact.profileName,
-        contact.businessDirectoryName,
-        contact.phoneNumber,
-        contact.waId,
-      ]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase();
-
-      return candidate.includes(query);
-    });
+    return allContacts;
   }, [allContacts, contactSearch]);
 
   const selectedWaIds = useMemo(
@@ -168,6 +235,16 @@ export function CampaignComposer({
       ...current,
       ...visibleContacts.map(buildContactRecipient),
     ]));
+  }
+
+  function handleContactListScroll(event: UIEvent<HTMLDivElement>) {
+    if (loadingContacts || loadingMoreContacts || !nextCursor) return;
+
+    const target = event.currentTarget;
+    const distanceToBottom = target.scrollHeight - target.scrollTop - target.clientHeight;
+    if (distanceToBottom > 180) return;
+
+    void loadContacts(lastLoadedSearchRef.current, nextCursor, false);
   }
 
   async function handleCreateList() {
@@ -244,7 +321,7 @@ export function CampaignComposer({
 
           <div className="broadcast-contact-summary">
             <strong>{selectedRecipients.length}</strong>
-            <span>selected from {allContacts.length} contacts</span>
+            <span>selected from {allContacts.length}{nextCursor ? '+' : ''} loaded contacts</span>
           </div>
 
           <label>
@@ -260,7 +337,7 @@ export function CampaignComposer({
           </label>
 
           <div className="contact-picker-toolbar">
-            <span>{visibleContacts.length} contacts</span>
+            <span>{visibleContacts.length}{nextCursor ? '+' : ''} contacts</span>
             <div className="contact-picker-toolbar__actions">
               <button type="button" className="ghost-button" onClick={toggleVisibleContacts} disabled={visibleContacts.length === 0}>
                 {allVisibleSelected ? 'Clear visible' : 'Select visible'}
@@ -276,8 +353,8 @@ export function CampaignComposer({
             </div>
           </div>
 
-          <div className="contact-picker-list contact-picker-list--broadcast">
-            {loadingContacts && <ContactRowsSkeleton />}
+          <div className="contact-picker-list contact-picker-list--broadcast" onScroll={handleContactListScroll}>
+            {loadingContacts && allContacts.length === 0 && <ContactRowsSkeleton />}
 
             {!loadingContacts && visibleContacts.length === 0 && (
               <div className="contact-picker-list__state">
@@ -285,7 +362,7 @@ export function CampaignComposer({
               </div>
             )}
 
-            {!loadingContacts && visibleContacts.map((contact) => {
+            {visibleContacts.map((contact) => {
               const isSelected = selectedWaIds.has(contact.waId);
 
               return (
@@ -306,6 +383,8 @@ export function CampaignComposer({
                 </button>
               );
             })}
+
+            {loadingMoreContacts && <ContactRowsSkeleton count={4} />}
           </div>
 
           {error && (

@@ -1,28 +1,49 @@
+import { Check, Forward, Star, X } from 'lucide-react';
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { CampaignComposer } from './components/CampaignComposer';
 import { ChatWindow } from './components/ChatWindow';
 import { ConversationList } from './components/ConversationList';
 import { BroadcastWorkspace } from './components/BroadcastWorkspace';
+import { AuthLoadingScreen, AuthScreen, PendingDeviceScreen } from './components/AuthScreens';
 import { AddContactDialog, StartChatDialog } from './components/ContactDialogs';
+import { DeviceManagerDialog } from './components/DeviceManagerDialog';
 import {
   clearContactList,
   clearConversation,
   createCampaign,
   deleteContactList,
   deleteConversation,
+  deleteMessage,
   getBootstrap,
+  getAuthStatus,
+  getCachedBootstrap,
+  getCachedConversations,
+  getCachedMessages,
   getContactList,
   getContactLists,
   getConversations,
   getMessages,
+  getStarredMessages,
+  listAuthDevices,
+  login,
+  logout as logoutAuth,
   markConversationRead,
+  register as registerAuth,
   sendConversationOptInTemplate,
   sendConversationMessage,
+  starMessage,
   startConversation,
+  unstarMessage,
+  updateAuthDevice,
   uploadMedia,
 } from './lib/api';
 import { socket } from './lib/socket';
-import type { BootstrapPayload, Campaign, Contact, ContactList, Conversation, Message } from './types';
+import type { AuthDevice, AuthStatus, BootstrapPayload, Campaign, Contact, ContactList, Conversation, Message, StarredMessage } from './types';
+
+type BroadcastSendPayload = {
+  bodyText: string;
+  file?: File | null;
+};
 
 const LOCAL_MEDIA_LABELS: Record<string, string> = {
   image: '[Image]',
@@ -76,6 +97,26 @@ function buildOptimisticPreview(messageType: string, textBody?: string | null, c
   return LOCAL_MEDIA_LABELS[messageType] || '[Message]';
 }
 
+function getMessageForwardText(message: Message) {
+  return message.textBody || message.caption || message.templateName || message.fileName || LOCAL_MEDIA_LABELS[message.messageType] || '[Message]';
+}
+
+function getMessageListPreview(message: Message) {
+  const text = message.textBody || message.caption || message.templateName || message.fileName;
+  if (text) return text;
+  return LOCAL_MEDIA_LABELS[message.messageType] || '[Message]';
+}
+
+function formatCompactDateTime(value: string | null) {
+  if (!value) return '';
+  return new Date(value).toLocaleString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).toLowerCase();
+}
+
 const MESSAGE_STATUS_RANK: Record<string, number> = {
   queued: 0,
   sent: 1,
@@ -109,13 +150,43 @@ function sortMessages(items: Message[]) {
   return [...items].sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime());
 }
 
+function removeReplacedReaction(items: Message[], parentWaMessageId: string | null, direction: Message['direction'], keepId?: number) {
+  if (!parentWaMessageId) return items;
+
+  return items.filter((item) => !(
+    item.id !== keepId
+    && item.messageType === 'reaction'
+    && item.parentWaMessageId === parentWaMessageId
+    && item.direction === direction
+  ));
+}
+
 function isMessageAfterConversationClear(message: Message, conversation: Conversation | null) {
   if (!conversation?.clearedAt) return true;
   return new Date(message.createdAt).getTime() > new Date(conversation.clearedAt).getTime();
 }
 
+function getRememberedEmail() {
+  if (typeof window === 'undefined') return '';
+  return window.localStorage.getItem('jjewa-remember-email') || '';
+}
+
 export default function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>(resolveInitialTheme);
+  const [themeTransitioning, setThemeTransitioning] = useState(false);
+  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState('');
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authName, setAuthName] = useState('');
+  const [authEmail, setAuthEmail] = useState(getRememberedEmail);
+  const [authPassword, setAuthPassword] = useState('');
+  const [rememberMe, setRememberMe] = useState(Boolean(getRememberedEmail()));
+  const [deviceManagerOpen, setDeviceManagerOpen] = useState(false);
+  const [devices, setDevices] = useState<AuthDevice[]>([]);
+  const [devicesLoading, setDevicesLoading] = useState(false);
+  const [devicesError, setDevicesError] = useState('');
   const [mutedConversationIds, setMutedConversationIds] = useState<number[]>(resolveMutedConversationIds);
   const [bootstrapped, setBootstrapped] = useState(false);
   const [numbers, setNumbers] = useState<BootstrapPayload['businessNumbers']>([]);
@@ -135,11 +206,21 @@ export default function App() {
   const [campaignOpen, setCampaignOpen] = useState(false);
   const [startChatOpen, setStartChatOpen] = useState(false);
   const [addContactOpen, setAddContactOpen] = useState(false);
+  const [starredOpen, setStarredOpen] = useState(false);
+  const [starredMessages, setStarredMessages] = useState<StarredMessage[]>([]);
+  const [starredLoading, setStarredLoading] = useState(false);
+  const [forwardTarget, setForwardTarget] = useState<Message | null>(null);
+  const [forwardSelectedIds, setForwardSelectedIds] = useState<number[]>([]);
+  const [forwarding, setForwarding] = useState(false);
+  const [forwardError, setForwardError] = useState('');
   const [isMobileLayout, setIsMobileLayout] = useState(resolveIsMobileLayout);
   const deferredSearch = useDeferredValue(search);
   const optimisticMessageIdRef = useRef(-1);
   const readInFlightRef = useRef<number | null>(null);
+  const themeTransitionTimeoutRef = useRef<number | null>(null);
+  const authStatusPromiseRef = useRef<Promise<AuthStatus | null> | null>(null);
   const isChatOpen = Boolean(activeConversation || activeContactListId);
+  const canUseApp = authStatus?.canUseApp === true;
 
   function clearUnreadLocally(conversationId: number) {
     setConversations((current) => current.map((conversation) => (
@@ -167,24 +248,198 @@ export default function App() {
     }
   }
 
-  async function loadBootstrap() {
-    const data = await getBootstrap();
+  function resetRuntimeState() {
+    setBootstrapped(false);
+    setNumbers([]);
+    setSelectedPhoneNumberId(null);
+    setConversations([]);
+    setContactLists([]);
+    setConversationCursor(null);
+    setConversationLoading(false);
+    setSearch('');
+    setActiveConversation(null);
+    setActiveContactListId(null);
+    setActiveContactList(null);
+    setMessages([]);
+    setMessageCursor(null);
+    setMessageLoading(false);
+    setCampaignOpen(false);
+    setStartChatOpen(false);
+    setAddContactOpen(false);
+    setStarredOpen(false);
+    setStarredMessages([]);
+    setForwardTarget(null);
+    setForwardSelectedIds([]);
+  }
+
+  async function refreshAuthStatus(showLoading = true) {
+    if (authStatusPromiseRef.current) return authStatusPromiseRef.current;
+
+    if (showLoading) setAuthLoading(true);
+    setAuthError('');
+
+    const statusPromise = (async () => {
+      try {
+        const status = await getAuthStatus();
+        setAuthStatus(status);
+        if (!status.canUseApp) {
+          socket.disconnect();
+          resetRuntimeState();
+        }
+        return status;
+      } catch (error) {
+        setAuthError(error instanceof Error ? error.message : 'Unable to check login status.');
+        setAuthStatus(null);
+        socket.disconnect();
+        resetRuntimeState();
+        return null;
+      } finally {
+        authStatusPromiseRef.current = null;
+        setAuthLoading(false);
+      }
+    })();
+
+    authStatusPromiseRef.current = statusPromise;
+    return statusPromise;
+  }
+
+  async function handleAuthSubmit() {
+    setAuthBusy(true);
+    setAuthError('');
+
+    try {
+      const status = authMode === 'register'
+        ? await registerAuth({
+          name: authName,
+          email: authEmail,
+          password: authPassword,
+          rememberMe,
+        })
+        : await login({
+          email: authEmail,
+          password: authPassword,
+          rememberMe,
+        });
+
+      if (rememberMe) {
+        window.localStorage.setItem('jjewa-remember-email', authEmail.trim().toLowerCase());
+      } else {
+        window.localStorage.removeItem('jjewa-remember-email');
+      }
+
+      setAuthPassword('');
+      setAuthStatus(status);
+      if (!status.canUseApp) {
+        resetRuntimeState();
+      }
+    } catch (error) {
+      const message = (error as { response?: { data?: { error?: string } } })?.response?.data?.error;
+      setAuthError(message || (error instanceof Error ? error.message : 'Login failed.'));
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function handleLogout() {
+    try {
+      await logoutAuth();
+    } finally {
+      socket.disconnect();
+      resetRuntimeState();
+      setAuthStatus(null);
+      setAuthPassword('');
+      setDeviceManagerOpen(false);
+    }
+  }
+
+  async function loadDevices() {
+    setDevicesLoading(true);
+    setDevicesError('');
+
+    try {
+      setDevices(await listAuthDevices());
+    } catch (error) {
+      const message = (error as { response?: { data?: { error?: string } } })?.response?.data?.error;
+      setDevicesError(message || (error instanceof Error ? error.message : 'Unable to load devices.'));
+    } finally {
+      setDevicesLoading(false);
+    }
+  }
+
+  async function handleUpdateDeviceStatus(deviceId: number, status: 'pending' | 'approved' | 'blocked') {
+    setDevicesError('');
+    try {
+      const updatedDevice = await updateAuthDevice(deviceId, { status });
+      setDevices((current) => current.map((device) => (device.id === deviceId ? updatedDevice : device)));
+      if (updatedDevice.isCurrent) {
+        void refreshAuthStatus(false);
+      }
+    } catch (error) {
+      const message = (error as { response?: { data?: { error?: string } } })?.response?.data?.error;
+      setDevicesError(message || (error instanceof Error ? error.message : 'Unable to update device.'));
+    }
+  }
+
+  function applyBootstrap(data: BootstrapPayload) {
     setNumbers(data.businessNumbers);
     setSelectedPhoneNumberId((current) => current ?? data.defaultPhoneNumberId);
     setBootstrapped(true);
   }
 
+  async function loadBootstrap() {
+    const data = await getBootstrap();
+    applyBootstrap(data);
+  }
+
+  function toggleTheme() {
+    if (themeTransitionTimeoutRef.current) {
+      window.clearTimeout(themeTransitionTimeoutRef.current);
+    }
+
+    setThemeTransitioning(false);
+    window.requestAnimationFrame(() => {
+      setThemeTransitioning(true);
+      setTheme((current) => (current === 'dark' ? 'light' : 'dark'));
+      themeTransitionTimeoutRef.current = window.setTimeout(() => {
+        setThemeTransitioning(false);
+        themeTransitionTimeoutRef.current = null;
+      }, 640);
+    });
+  }
+
   async function loadConversations(reset = true) {
     if (!selectedPhoneNumberId) return;
-    setConversationLoading(true);
+    const params = {
+      phoneNumberId: selectedPhoneNumberId,
+      search: deferredSearch,
+      cursor: reset ? null : conversationCursor,
+      limit: 20,
+    };
+
+    let showedCached = false;
+    if (reset) {
+      const cachedPayload = getCachedConversations(params);
+      if (cachedPayload) {
+        showedCached = true;
+        setConversations(cachedPayload.items);
+        setConversationCursor(cachedPayload.nextCursor);
+
+        if (activeContactListId) {
+          setActiveConversation(null);
+        } else if (cachedPayload.items.length === 0) {
+          setActiveConversation(null);
+        } else {
+          setActiveConversation((current) => current && current.phoneNumberId === selectedPhoneNumberId
+            ? cachedPayload.items.find((item) => item.id === current.id) || cachedPayload.items[0]
+            : isMobileLayout ? null : cachedPayload.items[0]);
+        }
+      }
+    }
+
+    setConversationLoading(!showedCached);
 
     try {
-      const payload = await getConversations({
-        phoneNumberId: selectedPhoneNumberId,
-        search: deferredSearch,
-        cursor: reset ? null : conversationCursor,
-        limit: 20,
-      });
+      const payload = await getConversations(params);
 
       setConversations((current) => (reset ? payload.items : [...current, ...payload.items]));
       setConversationCursor(payload.nextCursor);
@@ -218,7 +473,17 @@ export default function App() {
   }
 
   async function loadMessages(conversationId: number, reset = true) {
-    setMessageLoading(true);
+    let showedCached = false;
+    if (reset) {
+      const cachedPayload = getCachedMessages(conversationId);
+      if (cachedPayload) {
+        showedCached = true;
+        setMessages(cachedPayload.items);
+        setMessageCursor(cachedPayload.nextCursor);
+      }
+    }
+
+    setMessageLoading(!showedCached);
     try {
       const payload = await getMessages(conversationId, {
         cursor: reset ? null : messageCursor,
@@ -234,6 +499,8 @@ export default function App() {
 
   useEffect(() => {
     window.localStorage.setItem('jjewa-theme', theme);
+    document.documentElement.dataset.jjewaTheme = theme;
+    document.body.dataset.jjewaTheme = theme;
   }, [theme]);
 
   useEffect(() => {
@@ -250,18 +517,72 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    void loadBootstrap();
+    function syncViewportHeight() {
+      const height = window.visualViewport?.height || window.innerHeight;
+      const offsetTop = window.visualViewport?.offsetTop || 0;
+      document.documentElement.style.setProperty('--jjewa-viewport-height', `${height}px`);
+      document.documentElement.style.setProperty('--jjewa-viewport-offset-top', `${offsetTop}px`);
+    }
+
+    syncViewportHeight();
+    window.visualViewport?.addEventListener('resize', syncViewportHeight);
+    window.visualViewport?.addEventListener('scroll', syncViewportHeight);
+    window.addEventListener('resize', syncViewportHeight);
+
+    return () => {
+      window.visualViewport?.removeEventListener('resize', syncViewportHeight);
+      window.visualViewport?.removeEventListener('scroll', syncViewportHeight);
+      window.removeEventListener('resize', syncViewportHeight);
+      document.documentElement.style.removeProperty('--jjewa-viewport-height');
+      document.documentElement.style.removeProperty('--jjewa-viewport-offset-top');
+    };
   }, []);
 
   useEffect(() => {
-    if (!bootstrapped || !selectedPhoneNumberId) return;
-    void loadConversations(true);
-  }, [bootstrapped, selectedPhoneNumberId, deferredSearch]);
+    void refreshAuthStatus();
+
+    return () => {
+      if (themeTransitionTimeoutRef.current) {
+        window.clearTimeout(themeTransitionTimeoutRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
-    if (!bootstrapped || !selectedPhoneNumberId) return;
+    if (canUseApp) {
+      if (!socket.connected) socket.connect();
+      return;
+    }
+
+    socket.disconnect();
+  }, [canUseApp]);
+
+  useEffect(() => {
+    if (deviceManagerOpen) {
+      void loadDevices();
+    }
+  }, [deviceManagerOpen]);
+
+  useEffect(() => {
+    if (!canUseApp) return;
+
+    const cachedBootstrap = getCachedBootstrap();
+    if (cachedBootstrap) {
+      applyBootstrap(cachedBootstrap);
+    }
+
+    void loadBootstrap();
+  }, [canUseApp]);
+
+  useEffect(() => {
+    if (!canUseApp || !bootstrapped || !selectedPhoneNumberId) return;
+    void loadConversations(true);
+  }, [canUseApp, bootstrapped, selectedPhoneNumberId, deferredSearch]);
+
+  useEffect(() => {
+    if (!canUseApp || !bootstrapped || !selectedPhoneNumberId) return;
     void loadContactLists(selectedPhoneNumberId);
-  }, [bootstrapped, selectedPhoneNumberId]);
+  }, [canUseApp, bootstrapped, selectedPhoneNumberId]);
 
   useEffect(() => {
     if (!activeConversation) return;
@@ -293,15 +614,21 @@ export default function App() {
     }
 
     function handleMessageCreated(message: Message) {
+      if (message.deletedAt) return;
+
       const isActiveConversationMessage = message.conversationId === activeConversation?.id;
       if (isActiveConversationMessage && !isMessageAfterConversationClear(message, activeConversation)) {
         return;
       }
 
       if (isActiveConversationMessage) {
-        setMessages((current) => (
-          current.some((item) => item.id === message.id) ? current : [...current, message]
-        ));
+        setMessages((current) => {
+          if (current.some((item) => item.id === message.id)) return current;
+          const withoutReplacedReaction = message.messageType === 'reaction'
+            ? removeReplacedReaction(current, message.parentWaMessageId, message.direction, message.id)
+            : current;
+          return sortMessages([...withoutReplacedReaction, message]);
+        });
 
         if (message.direction === 'inbound') {
           void markConversationReadSmart(message.conversationId);
@@ -310,6 +637,11 @@ export default function App() {
     }
 
     function handleMessageStatus(message: Message) {
+      if (message.deletedAt) {
+        setMessages((current) => current.filter((item) => item.id !== message.id));
+        return;
+      }
+
       if (message.conversationId === activeConversation?.id && !isMessageAfterConversationClear(message, activeConversation)) {
         return;
       }
@@ -328,6 +660,10 @@ export default function App() {
         next[existingIndex] = mergeMessageUpdate(next[existingIndex], message);
         return next;
       });
+    }
+
+    function handleMessageDeleted(message: Message) {
+      setMessages((current) => current.filter((item) => item.id !== message.id));
     }
 
     function handleConversationDeleted(payload: { id: number; phoneNumberId: number }) {
@@ -364,6 +700,7 @@ export default function App() {
     socket.on('conversation:deleted', handleConversationDeleted);
     socket.on('message:created', handleMessageCreated);
     socket.on('message:status', handleMessageStatus);
+    socket.on('message:deleted', handleMessageDeleted);
     socket.on('contact-list:updated', handleContactListUpdated);
     socket.on('contact-list:deleted', handleContactListDeleted);
 
@@ -372,6 +709,7 @@ export default function App() {
       socket.off('conversation:deleted', handleConversationDeleted);
       socket.off('message:created', handleMessageCreated);
       socket.off('message:status', handleMessageStatus);
+      socket.off('message:deleted', handleMessageDeleted);
       socket.off('contact-list:updated', handleContactListUpdated);
       socket.off('contact-list:deleted', handleContactListDeleted);
     };
@@ -407,6 +745,8 @@ export default function App() {
       deliveredAt: null,
       readAt: null,
       failedAt: null,
+      starredAt: null,
+      deletedAt: null,
       createdAt: nowIso,
       updatedAt: nowIso,
     };
@@ -491,6 +831,8 @@ export default function App() {
       deliveredAt: null,
       readAt: null,
       failedAt: null,
+      starredAt: null,
+      deletedAt: null,
       createdAt: nowIso,
       updatedAt: nowIso,
     };
@@ -512,8 +854,8 @@ export default function App() {
         type: mediaType,
         mediaId: upload.mediaId,
         caption,
-        mimeType: file.type,
-        fileName: file.name,
+        mimeType: upload.mimeType || file.type,
+        fileName: upload.fileName || file.name,
         replyToWaMessageId: replyToWaMessageId || null,
       });
       URL.revokeObjectURL(localPreviewUrl);
@@ -573,11 +915,16 @@ export default function App() {
       deliveredAt: null,
       readAt: null,
       failedAt: null,
+      starredAt: null,
+      deletedAt: null,
       createdAt: nowIso,
       updatedAt: nowIso,
     };
 
-    setMessages((current) => [...current, optimisticMessage]);
+    setMessages((current) => sortMessages([
+      ...removeReplacedReaction(current, targetMessage.waMessageId, 'outbound'),
+      optimisticMessage,
+    ]));
 
     try {
       const sentMessage = await sendConversationMessage(activeConversation.id, {
@@ -586,15 +933,125 @@ export default function App() {
         replyToWaMessageId: targetMessage.waMessageId,
       });
       setMessages((current) => {
-        const withoutOptimistic = current.filter((item) => item.id !== optimisticId);
+        const withoutOptimistic = removeReplacedReaction(
+          current.filter((item) => item.id !== optimisticId),
+          targetMessage.waMessageId,
+          'outbound',
+          sentMessage.id,
+        );
         if (withoutOptimistic.some((item) => item.id === sentMessage.id)) {
           return withoutOptimistic;
         }
-        return [...withoutOptimistic, sentMessage];
+        return sortMessages([...withoutOptimistic, sentMessage]);
       });
     } catch (error) {
       setMessages((current) => current.filter((item) => item.id !== optimisticId));
       throw error;
+    }
+  }
+
+  async function handleToggleMessageStar(message: Message) {
+    if (message.id < 0) return;
+    const nextStarredAt = message.starredAt ? null : new Date().toISOString();
+
+    setMessages((current) => current.map((item) => (
+      item.id === message.id ? { ...item, starredAt: nextStarredAt } : item
+    )));
+
+    try {
+      const updatedMessage = message.starredAt
+        ? await unstarMessage(message.id)
+        : await starMessage(message.id);
+
+      setMessages((current) => current.map((item) => (
+        item.id === updatedMessage.id ? mergeMessageUpdate(item, updatedMessage) : item
+      )));
+    } catch (error) {
+      setMessages((current) => current.map((item) => (
+        item.id === message.id ? { ...item, starredAt: message.starredAt } : item
+      )));
+      throw error;
+    }
+  }
+
+  async function handleDeleteMessage(message: Message) {
+    if (message.id < 0) {
+      setMessages((current) => current.filter((item) => item.id !== message.id));
+      return;
+    }
+
+    const previousMessages = messages;
+    setMessages((current) => current.filter((item) => item.id !== message.id));
+
+    try {
+      const result = await deleteMessage(message.id);
+      setMessages((current) => current.filter((item) => item.id !== result.message.id));
+      setConversations((current) => upsertConversation(current, result.conversation));
+      setActiveConversation((current) => (
+        current?.id === result.conversation.id ? result.conversation : current
+      ));
+    } catch (error) {
+      setMessages(previousMessages);
+      throw error;
+    }
+  }
+
+  async function openStarredMessages() {
+    setStarredOpen(true);
+    setStarredLoading(true);
+    try {
+      setStarredMessages(await getStarredMessages(selectedPhoneNumberId));
+    } finally {
+      setStarredLoading(false);
+    }
+  }
+
+  function openForwardDialog(message: Message) {
+    setForwardTarget(message);
+    setForwardSelectedIds([]);
+    setForwardError('');
+  }
+
+  function closeForwardDialog() {
+    if (forwarding) return;
+    setForwardTarget(null);
+    setForwardSelectedIds([]);
+    setForwardError('');
+  }
+
+  function buildForwardPayload(message: Message) {
+    if (['image', 'video', 'audio', 'document'].includes(message.messageType) && message.mediaId) {
+      return {
+        type: message.messageType,
+        mediaId: message.mediaId,
+        caption: message.caption || message.textBody || '',
+        mimeType: message.mimeType || undefined,
+        fileName: message.fileName || undefined,
+      };
+    }
+
+    return {
+      type: 'text',
+      text: getMessageForwardText(message),
+    };
+  }
+
+  async function sendForwardedMessage() {
+    if (!forwardTarget || forwardSelectedIds.length === 0) return;
+
+    setForwarding(true);
+    setForwardError('');
+    try {
+      const payload = buildForwardPayload(forwardTarget);
+      await Promise.all(forwardSelectedIds.map((conversationId) => sendConversationMessage(conversationId, payload)));
+      setForwardTarget(null);
+      setForwardSelectedIds([]);
+      setForwardError('');
+      void loadConversations(true);
+    } catch (error) {
+      setForwardError(error instanceof Error ? error.message : 'Forward failed');
+    } finally {
+      setForwarding(false);
     }
   }
 
@@ -632,13 +1089,38 @@ export default function App() {
     }
   }
 
-  async function handleSendBroadcast(contactList: ContactList, bodyText: string): Promise<Campaign> {
+  async function handleSendBroadcast(contactList: ContactList, payload: BroadcastSendPayload): Promise<Campaign> {
+    const bodyText = payload.bodyText.trim();
+    const file = payload.file || null;
+    let mode: Campaign['mode'] = 'text';
+    let mediaId: string | undefined;
+    let mimeType: string | undefined;
+    let fileName: string | undefined;
+
+    if (file) {
+      mode = file.type.startsWith('image/')
+        ? 'image'
+        : file.type.startsWith('video/')
+          ? 'video'
+          : file.type.startsWith('audio/')
+            ? 'audio'
+            : 'document';
+
+      const upload = await uploadMedia(contactList.phoneNumberId, file);
+      mediaId = upload.mediaId;
+      mimeType = upload.mimeType || file.type;
+      fileName = upload.fileName || file.name;
+    }
+
     return createCampaign({
       phoneNumberId: contactList.phoneNumberId,
       contactListId: contactList.id,
       title: contactList.name,
-      mode: 'text',
+      mode,
       bodyText,
+      mediaId,
+      mimeType,
+      fileName,
       recipients: [],
     });
   }
@@ -689,11 +1171,55 @@ export default function App() {
     setMessageCursor(null);
   }
 
+  if (authLoading && !authStatus) {
+    return (
+      <div className={`wa-page theme-${theme} ${themeTransitioning ? 'is-theme-transitioning' : ''}`}>
+        <AuthLoadingScreen />
+      </div>
+    );
+  }
+
+  if (!authStatus?.authenticated) {
+    return (
+      <div className={`wa-page theme-${theme} ${themeTransitioning ? 'is-theme-transitioning' : ''}`}>
+        <AuthScreen
+          mode={authMode}
+          name={authName}
+          email={authEmail}
+          password={authPassword}
+          rememberMe={rememberMe}
+          loading={authBusy}
+          error={authError}
+          onModeChange={setAuthMode}
+          onNameChange={setAuthName}
+          onEmailChange={setAuthEmail}
+          onPasswordChange={setAuthPassword}
+          onRememberMeChange={setRememberMe}
+          onSubmit={handleAuthSubmit}
+        />
+      </div>
+    );
+  }
+
+  if (!authStatus.canUseApp) {
+    return (
+      <div className={`wa-page theme-${theme} ${themeTransitioning ? 'is-theme-transitioning' : ''}`}>
+        <PendingDeviceScreen
+          authStatus={authStatus}
+          loading={authLoading}
+          onRefresh={() => void refreshAuthStatus()}
+          onLogout={() => void handleLogout()}
+        />
+      </div>
+    );
+  }
+
   return (
-    <div className={`wa-page theme-${theme}`}>
+    <div className={`wa-page theme-${theme} ${themeTransitioning ? 'is-theme-transitioning' : ''}`}>
       <div className={`wa-app-shell ${isChatOpen ? 'wa-app-shell--chat-open' : 'wa-app-shell--list-open'}`}>
         <ConversationList
           theme={theme}
+          currentUser={authStatus.user}
           numbers={numbers}
           selectedPhoneNumberId={selectedPhoneNumberId}
           conversations={conversations}
@@ -703,7 +1229,7 @@ export default function App() {
           mutedConversationIds={mutedConversationIds}
           search={search}
           onSearchChange={setSearch}
-          onToggleTheme={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
+          onToggleTheme={toggleTheme}
           onSelectPhoneNumber={(phoneNumberId) => {
             setSelectedPhoneNumberId(phoneNumberId);
             setActiveConversation(null);
@@ -722,6 +1248,9 @@ export default function App() {
             setActiveContactListId(contactListId);
             setActiveContactList(selected);
           }}
+          onOpenStarred={() => void openStarredMessages()}
+          onOpenDevices={() => setDeviceManagerOpen(true)}
+          onLogout={() => void handleLogout()}
           onRefresh={() => {
             void loadConversations(true);
             if (selectedPhoneNumberId) {
@@ -743,6 +1272,7 @@ export default function App() {
         <main className="main-panel">
           {activeContactListId ? (
             <BroadcastWorkspace
+              theme={theme}
               contactList={activeContactList}
               onBack={handleBackToMobileList}
               onSendBroadcast={handleSendBroadcast}
@@ -765,6 +1295,9 @@ export default function App() {
               onSendText={handleSendText}
               onSendAttachment={handleSendAttachment}
               onSendReaction={handleSendReaction}
+              onToggleStar={handleToggleMessageStar}
+              onDeleteMessage={handleDeleteMessage}
+              onForwardMessage={openForwardDialog}
               onSendOptInTemplate={handleSendOptInTemplate}
               onToggleMute={() => {
                 if (!activeConversation) return;
@@ -805,6 +1338,143 @@ export default function App() {
         onClose={() => setAddContactOpen(false)}
         onContactCreated={handleStartChat}
       />
+
+      <DeviceManagerDialog
+        open={deviceManagerOpen}
+        devices={devices}
+        loading={devicesLoading}
+        error={devicesError}
+        onClose={() => setDeviceManagerOpen(false)}
+        onRefresh={() => void loadDevices()}
+        onUpdateStatus={(deviceId, status) => void handleUpdateDeviceStatus(deviceId, status)}
+      />
+
+      <div className={`bottom-sheet starred-sheet ${starredOpen ? 'is-open' : ''}`} aria-hidden={!starredOpen}>
+        <div className="bottom-sheet__backdrop" onClick={() => setStarredOpen(false)} />
+        <section className="bottom-sheet__panel frosted-panel" role="dialog" aria-modal="true">
+          <header className="bottom-sheet__header">
+            <div>
+              <span className="bottom-sheet__eyebrow">Starred</span>
+              <h2>Starred messages</h2>
+              <p>Saved messages from all chats.</p>
+            </div>
+            <button type="button" className="toolbar-icon-button" onClick={() => setStarredOpen(false)} title="Close">
+              <X size={18} />
+            </button>
+          </header>
+          <div className="bottom-sheet__body starred-message-list">
+            {starredLoading && (
+              <div className="skeleton-list">
+                {[0, 1, 2, 3].map((item) => (
+                  <div key={item} className="starred-message-row skeleton-contact-row">
+                    <span className="skeleton-avatar" />
+                    <span className="skeleton-contact-row__copy">
+                      <span className="skeleton-line skeleton-line--medium" />
+                      <span className="skeleton-line skeleton-line--short" />
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {!starredLoading && starredMessages.map((message) => (
+              <button
+                key={message.id}
+                type="button"
+                className="starred-message-row"
+                onClick={() => {
+                  const target = conversations.find((conversation) => conversation.id === message.conversationId);
+                  if (target) {
+                    setActiveContactListId(null);
+                    setActiveContactList(null);
+                    setActiveConversation(target);
+                  }
+                  setStarredOpen(false);
+                }}
+              >
+                <span className="starred-message-row__icon">
+                  <Star size={16} />
+                </span>
+                <span className="starred-message-row__copy">
+                  <strong>{message.contactName}</strong>
+                  <span>{getMessageListPreview(message)}</span>
+                </span>
+                <span className="starred-message-row__meta">
+                  <small>{formatCompactDateTime(message.createdAt)}</small>
+                  <small>starred {formatCompactDateTime(message.starredAt)}</small>
+                </span>
+              </button>
+            ))}
+
+            {!starredLoading && starredMessages.length === 0 && (
+              <div className="contact-picker-list__state">No starred messages yet.</div>
+            )}
+          </div>
+        </section>
+      </div>
+
+      <div className={`dialog-layer forward-layer ${forwardTarget ? 'is-open' : ''}`} aria-hidden={!forwardTarget}>
+        <div className="dialog-layer__backdrop" onClick={closeForwardDialog} />
+        <section className="forward-dialog frosted-panel" role="dialog" aria-modal="true">
+          <header className="forward-dialog__header">
+            <div>
+              <span className="bottom-sheet__eyebrow">Forward</span>
+              <h2>Forward message</h2>
+              <p>{forwardTarget ? getMessageListPreview(forwardTarget) : ''}</p>
+            </div>
+            <button type="button" className="toolbar-icon-button" onClick={closeForwardDialog} title="Close">
+              <X size={18} />
+            </button>
+          </header>
+
+          {forwardError && <div className="form-error">{forwardError}</div>}
+
+          <div className="forward-dialog__list">
+            {conversations.map((conversation) => {
+              const selected = forwardSelectedIds.includes(conversation.id);
+
+              return (
+                <button
+                  key={conversation.id}
+                  type="button"
+                  className={`forward-target-row ${selected ? 'is-selected' : ''}`}
+                  onClick={() => setForwardSelectedIds((current) => (
+                    current.includes(conversation.id)
+                      ? current.filter((id) => id !== conversation.id)
+                      : [...current, conversation.id]
+                  ))}
+                >
+                  <span className="conversation-card__avatar">
+                    {conversation.contactName.slice(0, 1).toUpperCase()}
+                  </span>
+                  <span className="forward-target-row__copy">
+                    <strong>{conversation.contactName}</strong>
+                    <span>{conversation.contactPhone || conversation.contactWaId}</span>
+                  </span>
+                  <span className={`contact-picker-row__checkbox ${selected ? 'is-selected' : ''}`}>
+                    {selected ? <Check size={14} /> : null}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          <footer className="forward-dialog__footer">
+            <button type="button" className="ghost-button" onClick={closeForwardDialog} disabled={forwarding}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => void sendForwardedMessage()}
+              disabled={forwarding || forwardSelectedIds.length === 0}
+            >
+              <Forward size={16} />
+              {forwarding ? 'Forwarding...' : `Forward ${forwardSelectedIds.length || ''}`}
+            </button>
+          </footer>
+        </section>
+      </div>
     </div>
   );
 }

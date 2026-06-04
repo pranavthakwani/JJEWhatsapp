@@ -27,9 +27,18 @@ const socketCorsOrigin = parseCorsOrigins(process.env.SOCKET_CORS_ORIGIN);
 
 export const env = {
   port: Number(process.env.PORT || 4500),
+  nodeEnv: process.env.NODE_ENV || 'development',
   supabase: {
     url: normaliseSupabaseUrl(process.env.SUPABASE_URL),
     serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
+  },
+  auth: {
+    secret: process.env.AUTH_SECRET || process.env.JWT_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY,
+    sessionCookieName: process.env.AUTH_SESSION_COOKIE_NAME || 'jjewa_session',
+    deviceCookieName: process.env.AUTH_DEVICE_COOKIE_NAME || 'jjewa_device',
+    sessionHours: Number(process.env.AUTH_SESSION_HOURS || 12),
+    rememberDays: Number(process.env.AUTH_REMEMBER_DAYS || 30),
+    deviceDays: Number(process.env.AUTH_DEVICE_DAYS || 365),
   },
   socketCorsOrigin,
   graphVersion: process.env.META_GRAPH_VERSION || 'v22.0',

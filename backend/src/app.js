@@ -31,7 +31,7 @@ export function createApp(io) {
       stack: error.stack,
     });
 
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       error: error.message || 'Internal server error',
     });
   });

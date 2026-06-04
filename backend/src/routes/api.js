@@ -1,8 +1,9 @@
 import express from 'express';
 import * as repo from '../services/chatRepository.js';
-import { downloadMediaContent, listMessageTemplates, markMessageAsRead, sendMediaMessage, sendReactionMessage, sendTemplateMessage, sendTextMessage, uploadMedia } from '../services/metaCloudService.js';
+import { downloadMediaContent, getBusinessProfile, listMessageTemplates, markMessageAsRead, sendMediaMessage, sendReactionMessage, sendTemplateMessage, sendTextMessage, uploadMedia } from '../services/metaCloudService.js';
 import { parseBusinessDirectoryWorkbook, parseUploadedWorkbook } from '../services/businessContactDirectory.js';
 import { handleMetaWebhook } from '../services/webhookService.js';
+import { getAuthStatus, listDevices, loginUser, logoutUser, registerUser, requireAppAccess, updateDevice } from '../services/authService.js';
 import { buildMessagePreview, normaliseRecipientWaId } from '../utils/messageFormat.js';
 import { logger } from '../utils/logger.js';
 
@@ -74,6 +75,31 @@ function resolveOptInTemplateKind(conversation, requestedKind) {
   return hasPriorPrompt ? 'followup' : 'intro';
 }
 
+function isBroadcastMediaMode(mode) {
+  return ['image', 'video', 'audio', 'document'].includes(mode);
+}
+
+async function attachBusinessProfilePictures(numbers) {
+  return Promise.all(numbers.map(async (number) => {
+    try {
+      const profile = await getBusinessProfile(number);
+      return {
+        ...number,
+        profilePictureUrl: profile?.profile_picture_url || null,
+      };
+    } catch (error) {
+      logger.warn('Business profile picture fetch skipped', {
+        phoneNumberId: number.phoneNumberId,
+        message: error?.message,
+      });
+      return {
+        ...number,
+        profilePictureUrl: null,
+      };
+    }
+  }));
+}
+
 export function createApiRouter(io) {
   const router = express.Router();
 
@@ -81,9 +107,68 @@ export function createApiRouter(io) {
     res.json({ ok: true });
   });
 
+  router.get('/auth/status', async (req, res, next) => {
+    try {
+      res.json(await getAuthStatus(req, res));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/auth/register', async (req, res, next) => {
+    try {
+      res.json(await registerUser(req, res, req.body || {}));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/auth/login', async (req, res, next) => {
+    try {
+      res.json(await loginUser(req, res, req.body || {}));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/auth/logout', async (req, res) => {
+    res.json(logoutUser(req, res));
+  });
+
+  router.get('/auth/devices', async (req, res, next) => {
+    try {
+      const payload = await listDevices(req, res);
+      if (payload) res.json(payload);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.patch('/auth/devices/:deviceId', async (req, res, next) => {
+    try {
+      const payload = await updateDevice(req, res);
+      if (payload) res.json(payload);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.use((req, res, next) => {
+    if (req.path.startsWith('/webhooks/meta')) {
+      next();
+      return;
+    }
+
+    requireAppAccess(req, res, next);
+  });
+
   router.get('/bootstrap', async (_req, res, next) => {
     try {
-      res.json(await repo.getBootstrapData());
+      const payload = await repo.getBootstrapData();
+      res.json({
+        ...payload,
+        businessNumbers: await attachBusinessProfilePictures(payload.businessNumbers),
+      });
     } catch (error) {
       next(error);
     }
@@ -91,7 +176,7 @@ export function createApiRouter(io) {
 
   router.get('/business-numbers', async (_req, res, next) => {
     try {
-      res.json(await repo.listBusinessNumbers());
+      res.json(await attachBusinessProfilePictures(await repo.listBusinessNumbers()));
     } catch (error) {
       next(error);
     }
@@ -243,7 +328,11 @@ export function createApiRouter(io) {
       const selectedTemplateLanguage = templateKind === 'followup'
         ? templates.followupTemplateLanguage
         : templates.initialTemplateLanguage;
-      const pendingStatus = templateKind === 'followup' ? 'pending_followup' : 'pending_initial';
+      const pendingStatus = conversation.contactOptInStatus === 'opted_in'
+        ? 'opted_in'
+        : templateKind === 'followup'
+          ? 'pending_followup'
+          : 'pending_initial';
 
       if (!selectedTemplateName) {
         res.status(400).json({
@@ -347,7 +436,7 @@ export function createApiRouter(io) {
           replyToWaMessageId,
         });
       } else if (type === 'reaction') {
-        if (!replyToWaMessageId || !emoji) {
+        if (!replyToWaMessageId || emoji === null || emoji === undefined) {
           res.status(400).json({ error: 'replyToWaMessageId and emoji are required for reactions' });
           return;
         }
@@ -408,14 +497,18 @@ export function createApiRouter(io) {
       const mimeType = req.headers['x-mime-type']?.toString() || 'application/octet-stream';
       const fileName = req.headers['x-file-name']?.toString() || 'upload.bin';
 
-      const mediaId = await uploadMedia({
+      const uploadedMedia = await uploadMedia({
         number,
         buffer: req.body,
         mimeType,
         fileName,
       });
 
-      res.json({ mediaId });
+      res.json({
+        mediaId: uploadedMedia.id,
+        mimeType: uploadedMedia.mimeType,
+        fileName: uploadedMedia.fileName,
+      });
     } catch (error) {
       next(error);
     }
@@ -590,6 +683,64 @@ export function createApiRouter(io) {
     }
   });
 
+  router.get('/messages/starred', async (req, res, next) => {
+    try {
+      const phoneNumberId = req.query.phoneNumberId ? Number(req.query.phoneNumberId) : null;
+      const limit = req.query.limit ? Number(req.query.limit) : 100;
+      res.json(await repo.listStarredMessages({ phoneNumberId, limit }));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/messages/:messageId/star', async (req, res, next) => {
+    try {
+      const message = await repo.setMessageStarred(Number(req.params.messageId), true);
+      if (!message) {
+        res.status(404).json({ error: 'Message not found' });
+        return;
+      }
+
+      io.emit('message:status', message);
+      res.json(message);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.delete('/messages/:messageId/star', async (req, res, next) => {
+    try {
+      const message = await repo.setMessageStarred(Number(req.params.messageId), false);
+      if (!message) {
+        res.status(404).json({ error: 'Message not found' });
+        return;
+      }
+
+      io.emit('message:status', message);
+      res.json(message);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.delete('/messages/:messageId', async (req, res, next) => {
+    try {
+      const result = await repo.softDeleteMessage(Number(req.params.messageId));
+      if (!result) {
+        res.status(404).json({ error: 'Message not found' });
+        return;
+      }
+
+      io.emit('message:deleted', result.message);
+      if (result.conversation) {
+        io.emit('conversation:updated', result.conversation);
+      }
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.get('/messages/:messageId/media', async (req, res, next) => {
     try {
       const message = await repo.getMessageById(Number(req.params.messageId));
@@ -664,6 +815,33 @@ export function createApiRouter(io) {
     }
   });
 
+  router.get('/campaigns/:campaignId/media', async (req, res, next) => {
+    try {
+      const campaign = await repo.getCampaignById(Number(req.params.campaignId));
+      if (!campaign?.mediaId) {
+        res.status(404).json({ error: 'Media not found' });
+        return;
+      }
+
+      const number = await repo.getBusinessNumberById(campaign.phoneNumberId);
+      if (!number) {
+        res.status(404).json({ error: 'Business number not found' });
+        return;
+      }
+
+      const media = await downloadMediaContent({
+        number,
+        mediaId: campaign.mediaId,
+      });
+
+      res.setHeader('Content-Type', media.mimeType);
+      res.setHeader('Content-Disposition', `inline; filename="${campaign.fileName || media.fileName || 'campaign-media'}"`);
+      res.send(Buffer.from(media.buffer));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.get('/campaigns/:campaignId', async (req, res, next) => {
     try {
       res.json(await repo.getCampaignById(Number(req.params.campaignId)));
@@ -718,7 +896,13 @@ export function createApiRouter(io) {
         return;
       }
 
-      const textBroadcastTemplates = mode === 'text'
+      if (isBroadcastMediaMode(mode) && !String(body.mediaId || '').trim()) {
+        res.status(400).json({ error: 'mediaId is required for media campaigns' });
+        return;
+      }
+
+      const needsOptInTemplates = mode === 'text' || isBroadcastMediaMode(mode);
+      const textBroadcastTemplates = needsOptInTemplates
         ? await resolveTextBroadcastTemplates(Number(body.phoneNumberId), body)
         : {
             initialTemplateName: body.initialTemplateName || null,
@@ -726,7 +910,7 @@ export function createApiRouter(io) {
             templateLanguage: body.templateLanguage || 'en',
           };
 
-      if (mode === 'text' && !textBroadcastTemplates.initialTemplateName) {
+      if (needsOptInTemplates && !textBroadcastTemplates.initialTemplateName) {
         res.status(400).json({
           error: 'No approved opt-in template found. Sync approved templates or set OPT_IN_INITIAL_TEMPLATE_NAME in backend env.',
         });
@@ -739,6 +923,9 @@ export function createApiRouter(io) {
         title: body.title || `Campaign ${new Date().toLocaleString('en-IN')}`,
         mode,
         bodyText: body.bodyText || null,
+        mediaId: body.mediaId || null,
+        mimeType: body.mimeType || null,
+        fileName: body.fileName || null,
         templateName: body.templateName || null,
         initialTemplateName: textBroadcastTemplates.initialTemplateName,
         followupTemplateName: textBroadcastTemplates.followupTemplateName,

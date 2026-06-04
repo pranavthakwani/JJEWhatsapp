@@ -211,6 +211,8 @@ function mapMessage(row) {
     deliveredAt: row.delivered_at,
     readAt: row.read_at,
     failedAt: row.failed_at,
+    starredAt: row.starred_at,
+    deletedAt: row.deleted_at || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -245,6 +247,9 @@ function mapCampaign(row) {
     title: row.title,
     mode: row.mode,
     bodyText: row.body_text,
+    mediaId: row.media_id || null,
+    mimeType: row.mime_type || null,
+    fileName: row.file_name || null,
     templateName: row.template_name,
     initialTemplateName: row.initial_template_name,
     followupTemplateName: row.followup_template_name,
@@ -739,16 +744,50 @@ export async function setContactOptInState(contactId, {
   };
 
   if (templateName !== undefined) {
-    updatePayload.last_opt_in_template_name = templateName;
-    if (templateName) {
-      updatePayload.last_opt_in_prompt_at = toIso(timestamp);
-    }
+    updatePayload.last_opt_in_template_name = templateName || null;
+    updatePayload.last_opt_in_prompt_at = templateName ? toIso(timestamp) : null;
   }
 
   requireData(await supabase
     .from('wa_contacts')
     .update(updatePayload)
     .eq('id', contactId));
+}
+
+async function clearFailedOptInPromptIfCurrent(messageRow, statusAt) {
+  if (
+    messageRow.direction !== 'outbound' ||
+    messageRow.message_type !== 'template' ||
+    !messageRow.contact_id ||
+    !messageRow.template_name
+  ) {
+    return false;
+  }
+
+  const contact = requireData(await supabase
+    .from('wa_contacts')
+    .select('id,opt_in_status,last_opt_in_template_name')
+    .eq('id', messageRow.contact_id)
+    .maybeSingle());
+
+  if (!contact) return false;
+
+  const contactStatus = String(contact.opt_in_status || '').toLowerCase();
+  if (contactStatus === 'opted_in') return false;
+
+  const isPendingOptIn = ['pending_initial', 'pending_followup'].includes(contactStatus);
+  const isCurrentPrompt = contact.last_opt_in_template_name === messageRow.template_name;
+
+  if (!isPendingOptIn && !isCurrentPrompt) return false;
+
+  await setContactOptInState(messageRow.contact_id, {
+    status: 'unknown',
+    source: 'template-failed',
+    templateName: null,
+    timestamp: statusAt,
+  });
+
+  return true;
 }
 
 export async function touchConversation({ conversationId, messageId, preview, timestamp, unreadIncrement = 0 }) {
@@ -787,6 +826,42 @@ export async function markConversationRead(conversationId) {
     .eq('id', conversationId);
 
   requireData(result);
+}
+
+export async function refreshConversationPreview(conversationId) {
+  const now = new Date().toISOString();
+  const conversation = requireData(await supabase
+    .from('wa_conversations')
+    .select('cleared_at')
+    .eq('id', conversationId)
+    .maybeSingle());
+
+  let latestQuery = supabase
+    .from('wa_messages')
+    .select('*')
+    .eq('conversation_id', conversationId)
+    .is('deleted_at', null)
+    .order('created_at', { ascending: false })
+    .limit(1);
+
+  if (conversation?.cleared_at) {
+    latestQuery = latestQuery.gt('created_at', conversation.cleared_at);
+  }
+
+  const latestRows = requireData(await latestQuery);
+  const latest = latestRows[0] || null;
+
+  requireData(await supabase
+    .from('wa_conversations')
+    .update({
+      last_message_id: latest?.id || null,
+      last_message_preview: latest ? buildMessagePreview(latest) : null,
+      last_message_at: latest?.created_at || null,
+      updated_at: now,
+    })
+    .eq('id', conversationId));
+
+  return getConversationById(conversationId);
 }
 
 export async function clearConversation(conversationId) {
@@ -829,6 +904,7 @@ export async function listRecentInboundWaMessageIds(conversationId, limit = 20) 
     .select('wa_message_id')
     .eq('conversation_id', conversationId)
     .eq('direction', 'inbound')
+    .is('deleted_at', null)
     .not('wa_message_id', 'is', null)
     .order('created_at', { ascending: false })
     .limit(limit);
@@ -942,6 +1018,7 @@ export async function listMessages({ conversationId, limit = 50, cursor }) {
     .from('wa_messages')
     .select('*')
     .eq('conversation_id', conversationId)
+    .is('deleted_at', null)
     .order('created_at', { ascending: false })
     .limit(limit + 1);
 
@@ -972,6 +1049,87 @@ export async function getMessageById(id) {
     .maybeSingle();
 
   return mapMessage(requireData(result));
+}
+
+export async function setMessageStarred(messageId, starred) {
+  const updated = await supabase
+    .from('wa_messages')
+    .update({
+      starred_at: starred ? new Date().toISOString() : null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', messageId)
+    .select('*')
+    .maybeSingle();
+
+  return mapMessage(requireData(updated));
+}
+
+export async function softDeleteMessage(messageId) {
+  const existing = await supabase
+    .from('wa_messages')
+    .select('*')
+    .eq('id', messageId)
+    .maybeSingle();
+
+  const row = requireData(existing);
+  if (!row) return null;
+
+  const now = new Date().toISOString();
+  const updated = await supabase
+    .from('wa_messages')
+    .update({
+      deleted_at: now,
+      starred_at: null,
+      updated_at: now,
+    })
+    .eq('id', messageId)
+    .select('*')
+    .single();
+
+  const message = mapMessage(requireData(updated));
+  const conversation = await refreshConversationPreview(row.conversation_id);
+
+  return { message, conversation };
+}
+
+export async function listStarredMessages({ phoneNumberId = null, limit = 100 } = {}) {
+  let query = supabase
+    .from('wa_messages')
+    .select('*')
+    .not('starred_at', 'is', null)
+    .is('deleted_at', null)
+    .order('starred_at', { ascending: false })
+    .limit(Math.min(Math.max(Number(limit) || 100, 1), 200));
+
+  if (phoneNumberId) {
+    query = query.eq('phone_number_id', phoneNumberId);
+  }
+
+  const rows = requireData(await query);
+  const messages = rows.map(mapMessage);
+  const conversationIds = [...new Set(messages.map((message) => message.conversationId))];
+  const conversationRows = conversationIds.length > 0
+    ? requireData(await supabase
+      .from('wa_conversations')
+      .select('*')
+      .in('id', conversationIds))
+    : [];
+  const conversationById = new Map(conversationRows.map((row) => [row.id, row]));
+  const contacts = await fetchContactsByIds([...new Set(conversationRows.map((row) => row.contact_id))]);
+
+  return messages.map((message) => {
+    const conversation = conversationById.get(message.conversationId);
+    const contact = conversation ? contacts.get(conversation.contact_id) : null;
+
+    return {
+      ...message,
+      contactName: contact?.profile_name || contact?.phone_number || contact?.wa_id || 'Unknown',
+      contactPhone: contact?.phone_number || null,
+      contactWaId: contact?.wa_id || '',
+      starredAt: message.starredAt,
+    };
+  });
 }
 
 export async function updateMessageStatusByWaMessageId({ waMessageId, status, statusAt, errorMessage }) {
@@ -1017,24 +1175,42 @@ export async function updateMessageStatusByWaMessageId({ waMessageId, status, st
   const message = mapMessage(requireData(updated));
 
   if (message?.campaignId) {
-    const recipientUpdate = {
-      status,
-      updated_at: new Date().toISOString(),
-      error_message: errorMessage || null,
-    };
-
-    if (status === 'sent') recipientUpdate.sent_at = toIso(statusAt);
-    if (status === 'delivered') recipientUpdate.delivered_at = toIso(statusAt);
-    if (status === 'read') recipientUpdate.read_at = toIso(statusAt);
-    if (status === 'failed') recipientUpdate.failed_at = toIso(statusAt);
-
-    requireData(await supabase
+    const matchingRecipients = requireData(await supabase
       .from('wa_campaign_recipients')
-      .update(recipientUpdate)
+      .select('id,status,prompt_template_name')
       .eq('campaign_id', message.campaignId)
       .eq('wa_message_id', waMessageId));
+    const isOptInPromptStatus = message.messageType === 'template'
+      && status !== 'failed'
+      && matchingRecipients.some((recipient) => (
+        ['optin_initial_sent', 'optin_followup_sent'].includes(recipient.status)
+        && recipient.prompt_template_name === message.templateName
+      ));
 
-    await refreshCampaignCounts(message.campaignId);
+    if (!isOptInPromptStatus) {
+      const recipientUpdate = {
+        status,
+        updated_at: new Date().toISOString(),
+        error_message: errorMessage || null,
+      };
+
+      if (status === 'sent') recipientUpdate.sent_at = toIso(statusAt);
+      if (status === 'delivered') recipientUpdate.delivered_at = toIso(statusAt);
+      if (status === 'read') recipientUpdate.read_at = toIso(statusAt);
+      if (status === 'failed') recipientUpdate.failed_at = toIso(statusAt);
+
+      requireData(await supabase
+        .from('wa_campaign_recipients')
+        .update(recipientUpdate)
+        .eq('campaign_id', message.campaignId)
+        .eq('wa_message_id', waMessageId));
+
+      await refreshCampaignCounts(message.campaignId);
+    }
+  }
+
+  if (status === 'failed') {
+    await clearFailedOptInPromptIfCurrent(row, statusIso);
   }
 
   return message;
@@ -1243,6 +1419,9 @@ export async function createCampaign({
   title,
   mode,
   bodyText,
+  mediaId = null,
+  mimeType = null,
+  fileName = null,
   templateName,
   initialTemplateName = null,
   followupTemplateName = null,
@@ -1250,6 +1429,19 @@ export async function createCampaign({
   templateParams,
   recipients,
 }) {
+  const uniqueRecipients = [];
+  const seenRecipientWaIds = new Set();
+
+  for (const recipient of recipients) {
+    const recipientWaId = normaliseRecipientWaId(recipient.waId);
+    if (!recipientWaId || seenRecipientWaIds.has(recipientWaId)) continue;
+    seenRecipientWaIds.add(recipientWaId);
+    uniqueRecipients.push({
+      ...recipient,
+      waId: recipientWaId,
+    });
+  }
+
   const campaignInsert = await supabase
     .from('wa_campaigns')
     .insert({
@@ -1258,12 +1450,15 @@ export async function createCampaign({
       title,
       mode,
       body_text: bodyText || null,
+      media_id: mediaId || null,
+      mime_type: mimeType || null,
+      file_name: fileName || null,
       template_name: templateName || null,
       initial_template_name: initialTemplateName,
       followup_template_name: followupTemplateName,
       template_language: templateLanguage || null,
       template_params_json: templateParams || [],
-      total_recipients: recipients.length,
+      total_recipients: uniqueRecipients.length,
     })
     .select('*')
     .single();
@@ -1280,10 +1475,10 @@ export async function createCampaign({
       .eq('id', contactListId));
   }
 
-  if (recipients.length > 0) {
-    const recipientRows = recipients.map((recipient) => ({
+  if (uniqueRecipients.length > 0) {
+    const recipientRows = uniqueRecipients.map((recipient) => ({
       campaign_id: campaign.id,
-      recipient_wa_id: normaliseRecipientWaId(recipient.waId),
+      recipient_wa_id: recipient.waId,
       recipient_name: recipient.name || null,
       contact_id: recipient.contactId || null,
       contact_list_member_id: recipient.contactListMemberId || null,
@@ -1452,6 +1647,7 @@ export async function markCampaignRecipientAwaitingOptIn({
   recipientId,
   contactId,
   conversationId,
+  waMessageId = null,
   promptTemplateName,
   nextStatus,
   requestedAt,
@@ -1461,6 +1657,7 @@ export async function markCampaignRecipientAwaitingOptIn({
     .update({
       contact_id: contactId,
       conversation_id: conversationId,
+      wa_message_id: waMessageId,
       prompt_template_name: promptTemplateName,
       status: nextStatus,
       opt_in_requested_at: toIso(requestedAt),
@@ -1480,6 +1677,9 @@ export async function getPendingOptInRecipientsForContact({ phoneNumberId, conta
         title,
         mode,
         body_text,
+        media_id,
+        mime_type,
+        file_name,
         template_name,
         initial_template_name,
         followup_template_name,
@@ -1602,6 +1802,20 @@ export async function createConversationMessageFromSend({
   responseMessageId,
   payload,
 }) {
+  if (payload.messageType === 'reaction' && payload.replyToWaMessageId) {
+    requireData(await supabase
+      .from('wa_messages')
+      .update({
+        deleted_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('conversation_id', conversationId)
+      .eq('direction', 'outbound')
+      .eq('message_type', 'reaction')
+      .eq('parent_wa_message_id', payload.replyToWaMessageId)
+      .is('deleted_at', null));
+  }
+
   const message = await insertMessage({
     conversationId,
     phoneNumberId,
@@ -1624,16 +1838,18 @@ export async function createConversationMessageFromSend({
     waTimestamp: new Date(),
   });
 
-  await touchConversation({
-    conversationId,
-    messageId: message.id,
-    preview: buildMessagePreview({
-      textBody: message.textBody,
-      caption: message.caption,
-      messageType: message.messageType,
-    }),
-    timestamp: message.createdAt,
-  });
+  if (message.messageType !== 'reaction') {
+    await touchConversation({
+      conversationId,
+      messageId: message.id,
+      preview: buildMessagePreview({
+        textBody: message.textBody,
+        caption: message.caption,
+        messageType: message.messageType,
+      }),
+      timestamp: message.createdAt,
+    });
+  }
 
   return message;
 }

@@ -1,5 +1,5 @@
 import * as repo from './chatRepository.js';
-import { sendTextMessage } from './metaCloudService.js';
+import { sendMediaMessage, sendTextMessage } from './metaCloudService.js';
 import { buildMessagePreview, extractInboundMessageParts, toDateFromUnixSeconds } from '../utils/messageFormat.js';
 import { logger } from '../utils/logger.js';
 
@@ -21,6 +21,67 @@ function mapStatus(status) {
 function isPositiveOptInReply(text) {
   if (!text) return false;
   return String(text).trim().toLowerCase() === 'yes';
+}
+
+function formatStatusErrors(errors) {
+  if (!Array.isArray(errors) || errors.length === 0) return null;
+
+  return errors
+    .map((error) => {
+      const details = [
+        error.title,
+        error.message,
+        error.error_data?.details,
+        error.code ? `code ${error.code}` : null,
+      ].filter(Boolean);
+
+      return [...new Set(details)].join(' - ');
+    })
+    .filter(Boolean)
+    .join('; ') || null;
+}
+
+function isMediaCampaign(campaign) {
+  return ['image', 'video', 'audio', 'document'].includes(campaign?.mode);
+}
+
+async function sendDeferredCampaignMessage({ number, campaign, contact }) {
+  if (isMediaCampaign(campaign)) {
+    return sendMediaMessage({
+      number,
+      to: contact.waId,
+      mediaType: campaign.mode,
+      mediaId: campaign.mediaId,
+      caption: campaign.mode === 'audio' ? null : campaign.bodyText,
+      fileName: campaign.fileName,
+    });
+  }
+
+  return sendTextMessage({
+    number,
+    to: contact.waId,
+    body: campaign.bodyText,
+  });
+}
+
+function buildDeferredCampaignPayload(campaign) {
+  if (isMediaCampaign(campaign)) {
+    return {
+      messageType: campaign.mode,
+      textBody: null,
+      caption: campaign.bodyText || null,
+      mediaId: campaign.mediaId,
+      mimeType: campaign.mimeType,
+      fileName: campaign.fileName,
+      campaignId: campaign.id,
+    };
+  }
+
+  return {
+    messageType: 'text',
+    textBody: campaign.bodyText,
+    campaignId: campaign.id,
+  };
 }
 
 export async function handleMetaWebhook(payload, io) {
@@ -116,13 +177,13 @@ export async function handleMetaWebhook(payload, io) {
           });
 
           for (const item of pendingRecipients) {
-            if (!item.campaign?.bodyText) continue;
+            if (!item.campaign?.bodyText && !item.campaign?.mediaId) continue;
 
             try {
-              const sendResult = await sendTextMessage({
+              const sendResult = await sendDeferredCampaignMessage({
                 number,
-                to: contact.waId,
-                body: item.campaign.bodyText,
+                campaign: item.campaign,
+                contact,
               });
 
               const outboundMessage = await repo.createConversationMessageFromSend({
@@ -130,11 +191,7 @@ export async function handleMetaWebhook(payload, io) {
                 phoneNumberId: number.id,
                 contactId: contact.id,
                 responseMessageId: sendResult.messageId,
-                payload: {
-                  messageType: 'text',
-                  textBody: item.campaign.bodyText,
-                  campaignId: item.campaign.id,
-                },
+                payload: buildDeferredCampaignPayload(item.campaign),
               });
 
               await repo.markCampaignRecipientSent({
@@ -173,21 +230,29 @@ export async function handleMetaWebhook(payload, io) {
       }
 
       for (const statusEvent of value.statuses || []) {
+        const mappedStatus = mapStatus(statusEvent.status);
+        const errorMessage = formatStatusErrors(statusEvent.errors);
+
         logger.info('Meta message status received', {
           waMessageId: statusEvent.id,
           status: statusEvent.status,
           recipientId: statusEvent.recipient_id,
+          errorMessage,
         });
 
         const updated = await repo.updateMessageStatusByWaMessageId({
           waMessageId: statusEvent.id,
-          status: mapStatus(statusEvent.status),
+          status: mappedStatus,
           statusAt: toDateFromUnixSeconds(statusEvent.timestamp) || new Date(),
-          errorMessage: statusEvent.errors?.map((error) => error.title || error.message).join('; ') || null,
+          errorMessage,
         });
 
         if (updated) {
           io.emit('message:status', updated);
+          if (mappedStatus === 'failed') {
+            const conversation = await repo.getConversationById(updated.conversationId);
+            io.emit('conversation:updated', conversation);
+          }
           if (updated.campaignId) {
             const campaign = await repo.getCampaignById(updated.campaignId);
             io.emit('campaign:updated', campaign);

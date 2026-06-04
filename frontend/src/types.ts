@@ -6,8 +6,40 @@ export type BusinessNumber = {
   displayName: string;
   phoneNumber: string;
   phoneNumberId: string;
+  profilePictureUrl?: string | null;
   isDefault: boolean;
   status: string;
+};
+
+export type AuthUser = {
+  id: number;
+  name: string;
+  email: string;
+  role: 'admin' | 'user' | string;
+  status: string;
+  createdAt: string;
+  updatedAt: string | null;
+};
+
+export type AuthDevice = {
+  id: number;
+  deviceCode: string;
+  deviceName: string | null;
+  browserInfo: string | null;
+  ipAddress: string | null;
+  status: 'pending' | 'approved' | 'blocked' | string;
+  approvedBy: string | null;
+  approvedAt: string | null;
+  lastSeenAt: string | null;
+  createdAt: string;
+  isCurrent: boolean;
+};
+
+export type AuthStatus = {
+  authenticated: boolean;
+  canUseApp: boolean;
+  user: AuthUser | null;
+  device: AuthDevice | null;
 };
 
 export type Contact = {
@@ -96,8 +128,17 @@ export type Message = {
   deliveredAt: string | null;
   readAt: string | null;
   failedAt: string | null;
+  starredAt: string | null;
+  deletedAt?: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type StarredMessage = Message & {
+  contactName: string;
+  contactPhone: string | null;
+  contactWaId: string;
+  starredAt: string;
 };
 
 export type Template = {
@@ -140,8 +181,11 @@ export type Campaign = {
   phoneNumberId: number;
   contactListId?: number | null;
   title: string;
-  mode: 'text' | 'template';
+  mode: 'text' | 'template' | 'image' | 'video' | 'audio' | 'document';
   bodyText: string | null;
+  mediaId?: string | null;
+  mimeType?: string | null;
+  fileName?: string | null;
   templateName: string | null;
   initialTemplateName?: string | null;
   followupTemplateName?: string | null;

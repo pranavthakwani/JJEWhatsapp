@@ -1,5 +1,7 @@
 import axios from 'axios';
 import type {
+  AuthDevice,
+  AuthStatus,
   BootstrapPayload,
   Campaign,
   Contact,
@@ -8,22 +10,155 @@ import type {
   Conversation,
   Message,
   PaginatedResult,
+  StarredMessage,
   Template,
 } from '../types';
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:4500/api',
+  withCredentials: true,
 });
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4500/api';
+const BOOTSTRAP_CACHE_TTL_MS = 5 * 60 * 1000;
+const CONVERSATION_CACHE_TTL_MS = 2 * 60 * 1000;
+const MESSAGE_CACHE_TTL_MS = 10 * 60 * 1000;
+const CONTACT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const BROADCAST_HISTORY_CACHE_TTL_MS = 5 * 60 * 1000;
+
+type CacheEnvelope<T> = {
+  savedAt: number;
+  data: T;
+};
+
+function makeCacheKey(name: string) {
+  return `jjewa-cache:${name}:${apiBaseUrl}`;
+}
+
+function readCache<T>(key: string, ttlMs: number) {
+  if (typeof window === 'undefined') return null;
+
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw) as CacheEnvelope<T>;
+    if (!parsed?.savedAt || Date.now() - parsed.savedAt > ttlMs) {
+      window.localStorage.removeItem(key);
+      return null;
+    }
+
+    return parsed.data;
+  } catch {
+    window.localStorage.removeItem(key);
+    return null;
+  }
+}
+
+function writeCache<T>(key: string, data: T) {
+  if (typeof window === 'undefined') return;
+
+  try {
+    window.localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
+  } catch {
+    // Cache failures should never block the live API path.
+  }
+}
+
+export function getCachedBootstrap() {
+  return readCache<BootstrapPayload>(makeCacheKey('bootstrap'), BOOTSTRAP_CACHE_TTL_MS);
+}
+
+function normaliseSearch(value = '') {
+  return value.trim().toLowerCase();
+}
+
+function makeConversationCacheName(params: { phoneNumberId?: number | null; search?: string; cursor?: string | null; limit?: number }) {
+  return `conversations:${params.phoneNumberId || 'all'}:${normaliseSearch(params.search || '')}:${params.cursor || 'first'}:${params.limit || 20}`;
+}
+
+function makeContactPageCacheName(query = '', limit = 300, cursor?: string | null) {
+  return `contacts-page:${normaliseSearch(query)}:${cursor || 'first'}:${limit}`;
+}
+
+export function getCachedConversations(params: { phoneNumberId?: number | null; search?: string; cursor?: string | null; limit?: number }) {
+  return readCache<PaginatedResult<Conversation>>(makeCacheKey(makeConversationCacheName(params)), CONVERSATION_CACHE_TTL_MS);
+}
+
+export function cacheConversations(params: { phoneNumberId?: number | null; search?: string; cursor?: string | null; limit?: number }, data: PaginatedResult<Conversation>) {
+  writeCache(makeCacheKey(makeConversationCacheName(params)), data);
+}
+
+export function getCachedMessages(conversationId: number) {
+  return readCache<PaginatedResult<Message>>(makeCacheKey(`messages:${conversationId}:first:30`), MESSAGE_CACHE_TTL_MS);
+}
+
+export function cacheMessages(conversationId: number, data: PaginatedResult<Message>) {
+  writeCache(makeCacheKey(`messages:${conversationId}:first:30`), data);
+}
+
+export function getCachedContactsPage(query = '', limit = 300, cursor?: string | null) {
+  return readCache<PaginatedResult<Contact>>(makeCacheKey(makeContactPageCacheName(query, limit, cursor)), CONTACT_CACHE_TTL_MS);
+}
+
+export function cacheContactsPage(query = '', limit = 300, cursor: string | null | undefined, data: PaginatedResult<Contact>) {
+  writeCache(makeCacheKey(makeContactPageCacheName(query, limit, cursor)), data);
+}
+
+export function getCachedContactDirectory(limit = 50000) {
+  return readCache<Contact[]>(makeCacheKey(`contacts-directory:${limit}`), CONTACT_CACHE_TTL_MS);
+}
+
+export function cacheContactDirectory(limit: number, data: Contact[]) {
+  writeCache(makeCacheKey(`contacts-directory:${limit}`), data);
+}
+
+export function getCachedContactListCampaigns(contactListId: number) {
+  return readCache<Campaign[]>(makeCacheKey(`broadcast-history:${contactListId}`), BROADCAST_HISTORY_CACHE_TTL_MS);
+}
+
+export function cacheContactListCampaigns(contactListId: number, data: Campaign[]) {
+  writeCache(makeCacheKey(`broadcast-history:${contactListId}`), data);
+}
+
+export async function getAuthStatus() {
+  const { data } = await api.get<AuthStatus>('/auth/status');
+  return data;
+}
+
+export async function login(payload: { email: string; password: string; rememberMe: boolean }) {
+  const { data } = await api.post<AuthStatus>('/auth/login', payload);
+  return data;
+}
+
+export async function register(payload: { name: string; email: string; password: string; rememberMe: boolean }) {
+  const { data } = await api.post<AuthStatus>('/auth/register', payload);
+  return data;
+}
+
+export async function logout() {
+  await api.post('/auth/logout');
+}
+
+export async function listAuthDevices() {
+  const { data } = await api.get<{ devices: AuthDevice[] }>('/auth/devices');
+  return data.devices;
+}
+
+export async function updateAuthDevice(deviceId: number, payload: { status?: 'pending' | 'approved' | 'blocked'; deviceName?: string }) {
+  const { data } = await api.patch<{ device: AuthDevice }>(`/auth/devices/${deviceId}`, payload);
+  return data.device;
+}
 
 export async function getBootstrap() {
   const { data } = await api.get<BootstrapPayload>('/bootstrap');
+  writeCache(makeCacheKey('bootstrap'), data);
   return data;
 }
 
 export async function getConversations(params: { phoneNumberId?: number | null; search?: string; cursor?: string | null; limit?: number }) {
   const { data } = await api.get<PaginatedResult<Conversation>>('/conversations', { params });
+  cacheConversations(params, data);
   return data;
 }
 
@@ -34,6 +169,9 @@ export async function getConversation(conversationId: number) {
 
 export async function getMessages(conversationId: number, params?: { cursor?: string | null; limit?: number }) {
   const { data } = await api.get<PaginatedResult<Message>>(`/conversations/${conversationId}/messages`, { params });
+  if (!params?.cursor) {
+    cacheMessages(conversationId, data);
+  }
   return data;
 }
 
@@ -71,7 +209,7 @@ export async function sendConversationMessage(
 }
 
 export async function uploadMedia(phoneNumberId: number, file: File) {
-  const { data } = await api.post<{ mediaId: string }>(`/media/upload/${phoneNumberId}`, await file.arrayBuffer(), {
+  const { data } = await api.post<{ mediaId: string; mimeType?: string; fileName?: string }>(`/media/upload/${phoneNumberId}`, await file.arrayBuffer(), {
     headers: {
       'Content-Type': file.type || 'application/octet-stream',
       'x-file-name': file.name,
@@ -95,6 +233,10 @@ export async function listContacts(query = '', limit = 250) {
     params: { q: query, limit },
   });
 
+  if (!query.trim()) {
+    cacheContactDirectory(limit, data);
+  }
+
   return data;
 }
 
@@ -103,6 +245,7 @@ export async function listContactsPage(query = '', limit = 300, cursor?: string 
     params: { q: query, limit, cursor },
   });
 
+  cacheContactsPage(query, limit, cursor, data);
   return data;
 }
 
@@ -121,6 +264,29 @@ export async function sendConversationOptInTemplate(conversationId: number, temp
     `/conversations/${conversationId}/opt-in`,
     { templateKind },
   );
+  return data;
+}
+
+export async function starMessage(messageId: number) {
+  const { data } = await api.post<Message>(`/messages/${messageId}/star`);
+  return data;
+}
+
+export async function unstarMessage(messageId: number) {
+  const { data } = await api.delete<Message>(`/messages/${messageId}/star`);
+  return data;
+}
+
+export async function getStarredMessages(phoneNumberId?: number | null) {
+  const { data } = await api.get<StarredMessage[]>('/messages/starred', {
+    params: { phoneNumberId },
+  });
+
+  return data;
+}
+
+export async function deleteMessage(messageId: number) {
+  const { data } = await api.delete<{ message: Message; conversation: Conversation }>(`/messages/${messageId}`);
   return data;
 }
 
@@ -220,6 +386,7 @@ export async function getContactListCampaigns(contactListId: number) {
     params: { contactListId },
   });
 
+  cacheContactListCampaigns(contactListId, data);
   return data;
 }
 
@@ -232,8 +399,11 @@ export async function createCampaign(payload: {
   phoneNumberId: number;
   contactListId?: number | null;
   title: string;
-  mode: 'text' | 'template';
+  mode: 'text' | 'template' | 'image' | 'video' | 'audio' | 'document';
   bodyText?: string;
+  mediaId?: string;
+  mimeType?: string;
+  fileName?: string;
   templateName?: string;
   initialTemplateName?: string;
   followupTemplateName?: string;
@@ -247,4 +417,8 @@ export async function createCampaign(payload: {
 
 export function getMediaUrl(messageId: number) {
   return `${apiBaseUrl}/messages/${messageId}/media`;
+}
+
+export function getCampaignMediaUrl(campaignId: number) {
+  return `${apiBaseUrl}/campaigns/${campaignId}/media`;
 }
