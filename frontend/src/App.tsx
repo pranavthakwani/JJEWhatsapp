@@ -4,7 +4,7 @@ import { CampaignComposer } from './components/CampaignComposer';
 import { ChatWindow } from './components/ChatWindow';
 import { ConversationList } from './components/ConversationList';
 import { BroadcastWorkspace } from './components/BroadcastWorkspace';
-import { AuthLoadingScreen, AuthScreen, PendingDeviceScreen } from './components/AuthScreens';
+import { AuthLoadingScreen, PendingDeviceScreen } from './components/AuthScreens';
 import { AddContactDialog, StartChatDialog } from './components/ContactDialogs';
 import { DeviceManagerDialog } from './components/DeviceManagerDialog';
 import {
@@ -25,10 +25,8 @@ import {
   getMessages,
   getStarredMessages,
   listAuthDevices,
-  login,
   logout as logoutAuth,
   markConversationRead,
-  register as registerAuth,
   sendConversationOptInTemplate,
   sendConversationMessage,
   starMessage,
@@ -166,23 +164,12 @@ function isMessageAfterConversationClear(message: Message, conversation: Convers
   return new Date(message.createdAt).getTime() > new Date(conversation.clearedAt).getTime();
 }
 
-function getRememberedEmail() {
-  if (typeof window === 'undefined') return '';
-  return window.localStorage.getItem('jjewa-remember-email') || '';
-}
-
 export default function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>(resolveInitialTheme);
   const [themeTransitioning, setThemeTransitioning] = useState(false);
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
-  const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState('');
-  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
-  const [authName, setAuthName] = useState('');
-  const [authEmail, setAuthEmail] = useState(getRememberedEmail);
-  const [authPassword, setAuthPassword] = useState('');
-  const [rememberMe, setRememberMe] = useState(Boolean(getRememberedEmail()));
   const [deviceManagerOpen, setDeviceManagerOpen] = useState(false);
   const [devices, setDevices] = useState<AuthDevice[]>([]);
   const [devicesLoading, setDevicesLoading] = useState(false);
@@ -288,7 +275,7 @@ export default function App() {
         }
         return status;
       } catch (error) {
-        setAuthError(error instanceof Error ? error.message : 'Unable to check login status.');
+        setAuthError(error instanceof Error ? error.message : 'Unable to check device status.');
         setAuthStatus(null);
         socket.disconnect();
         resetRuntimeState();
@@ -303,52 +290,15 @@ export default function App() {
     return statusPromise;
   }
 
-  async function handleAuthSubmit() {
-    setAuthBusy(true);
-    setAuthError('');
-
-    try {
-      const status = authMode === 'register'
-        ? await registerAuth({
-          name: authName,
-          email: authEmail,
-          password: authPassword,
-          rememberMe,
-        })
-        : await login({
-          email: authEmail,
-          password: authPassword,
-          rememberMe,
-        });
-
-      if (rememberMe) {
-        window.localStorage.setItem('jjewa-remember-email', authEmail.trim().toLowerCase());
-      } else {
-        window.localStorage.removeItem('jjewa-remember-email');
-      }
-
-      setAuthPassword('');
-      setAuthStatus(status);
-      if (!status.canUseApp) {
-        resetRuntimeState();
-      }
-    } catch (error) {
-      const message = (error as { response?: { data?: { error?: string } } })?.response?.data?.error;
-      setAuthError(message || (error instanceof Error ? error.message : 'Login failed.'));
-    } finally {
-      setAuthBusy(false);
-    }
-  }
-
-  async function handleLogout() {
+  async function handleResetDevice() {
     try {
       await logoutAuth();
     } finally {
       socket.disconnect();
       resetRuntimeState();
       setAuthStatus(null);
-      setAuthPassword('');
       setDeviceManagerOpen(false);
+      void refreshAuthStatus();
     }
   }
 
@@ -1179,23 +1129,20 @@ export default function App() {
     );
   }
 
-  if (!authStatus?.authenticated) {
+  if (!authStatus) {
     return (
       <div className={`wa-page theme-${theme} ${themeTransitioning ? 'is-theme-transitioning' : ''}`}>
-        <AuthScreen
-          mode={authMode}
-          name={authName}
-          email={authEmail}
-          password={authPassword}
-          rememberMe={rememberMe}
-          loading={authBusy}
+        <PendingDeviceScreen
+          authStatus={{
+            authenticated: false,
+            canUseApp: false,
+            user: null,
+            device: null,
+          }}
+          loading={authLoading}
           error={authError}
-          onModeChange={setAuthMode}
-          onNameChange={setAuthName}
-          onEmailChange={setAuthEmail}
-          onPasswordChange={setAuthPassword}
-          onRememberMeChange={setRememberMe}
-          onSubmit={handleAuthSubmit}
+          onRefresh={() => void refreshAuthStatus()}
+          onResetDevice={() => void handleResetDevice()}
         />
       </div>
     );
@@ -1207,8 +1154,9 @@ export default function App() {
         <PendingDeviceScreen
           authStatus={authStatus}
           loading={authLoading}
+          error={authError}
           onRefresh={() => void refreshAuthStatus()}
-          onLogout={() => void handleLogout()}
+          onResetDevice={() => void handleResetDevice()}
         />
       </div>
     );
@@ -1219,7 +1167,6 @@ export default function App() {
       <div className={`wa-app-shell ${isChatOpen ? 'wa-app-shell--chat-open' : 'wa-app-shell--list-open'}`}>
         <ConversationList
           theme={theme}
-          currentUser={authStatus.user}
           numbers={numbers}
           selectedPhoneNumberId={selectedPhoneNumberId}
           conversations={conversations}
@@ -1250,7 +1197,7 @@ export default function App() {
           }}
           onOpenStarred={() => void openStarredMessages()}
           onOpenDevices={() => setDeviceManagerOpen(true)}
-          onLogout={() => void handleLogout()}
+          onResetDevice={() => void handleResetDevice()}
           onRefresh={() => {
             void loadConversations(true);
             if (selectedPhoneNumberId) {

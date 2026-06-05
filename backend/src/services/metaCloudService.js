@@ -224,6 +224,7 @@ export async function uploadMedia({ number, buffer, mimeType, fileName }) {
     id: data.id,
     mimeType: uploadMimeType,
     fileName: uploadFileName,
+    buffer: uploadBuffer,
   };
 }
 

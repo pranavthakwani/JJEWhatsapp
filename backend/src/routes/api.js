@@ -1,9 +1,10 @@
 import express from 'express';
 import * as repo from '../services/chatRepository.js';
 import { downloadMediaContent, getBusinessProfile, listMessageTemplates, markMessageAsRead, sendMediaMessage, sendReactionMessage, sendTemplateMessage, sendTextMessage, uploadMedia } from '../services/metaCloudService.js';
+import { downloadStoredMedia, storeMediaBuffer } from '../services/mediaStorageService.js';
 import { parseBusinessDirectoryWorkbook, parseUploadedWorkbook } from '../services/businessContactDirectory.js';
 import { handleMetaWebhook } from '../services/webhookService.js';
-import { getAuthStatus, listDevices, loginUser, logoutUser, registerUser, requireAppAccess, updateDevice } from '../services/authService.js';
+import { getAuthStatus, listDevices, logoutUser, requireAppAccess, updateDevice } from '../services/authService.js';
 import { buildMessagePreview, normaliseRecipientWaId } from '../utils/messageFormat.js';
 import { logger } from '../utils/logger.js';
 
@@ -79,6 +80,57 @@ function isBroadcastMediaMode(mode) {
   return ['image', 'video', 'audio', 'document'].includes(mode);
 }
 
+function sanitizeDownloadFileName(fileName, fallback = 'media') {
+  return String(fileName || fallback).replace(/["\r\n]/g, '').trim() || fallback;
+}
+
+function sendMediaResponse(res, media, fileName) {
+  const buffer = Buffer.from(media.buffer);
+  res.setHeader('Content-Type', media.mimeType || 'application/octet-stream');
+  res.setHeader('Content-Length', String(buffer.length));
+  res.setHeader('Content-Disposition', `inline; filename="${sanitizeDownloadFileName(fileName || media.fileName)}"`);
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.send(buffer);
+}
+
+async function persistDownloadedMessageMedia(message, media) {
+  const stored = await storeMediaBuffer({
+    phoneNumberId: message.phoneNumberId,
+    source: 'messages',
+    mediaId: message.mediaId,
+    buffer: Buffer.from(media.buffer),
+    mimeType: media.mimeType || message.mimeType || 'application/octet-stream',
+    fileName: message.fileName || message.mediaId,
+  });
+
+  return repo.updateMessageMediaStorage(message.id, {
+    storageBucket: stored.storageBucket,
+    storagePath: stored.storagePath,
+    mediaSize: stored.mediaSize,
+    mimeType: stored.mimeType,
+    fileName: message.fileName || stored.fileName,
+  });
+}
+
+async function persistDownloadedCampaignMedia(campaign, media) {
+  const stored = await storeMediaBuffer({
+    phoneNumberId: campaign.phoneNumberId,
+    source: 'campaigns',
+    mediaId: campaign.mediaId,
+    buffer: Buffer.from(media.buffer),
+    mimeType: media.mimeType || campaign.mimeType || 'application/octet-stream',
+    fileName: campaign.fileName || campaign.mediaId,
+  });
+
+  return repo.updateCampaignMediaStorage(campaign.id, {
+    storageBucket: stored.storageBucket,
+    storagePath: stored.storagePath,
+    mediaSize: stored.mediaSize,
+    mimeType: stored.mimeType,
+    fileName: campaign.fileName || stored.fileName,
+  });
+}
+
 async function attachBusinessProfilePictures(numbers) {
   return Promise.all(numbers.map(async (number) => {
     try {
@@ -117,7 +169,7 @@ export function createApiRouter(io) {
 
   router.post('/auth/register', async (req, res, next) => {
     try {
-      res.json(await registerUser(req, res, req.body || {}));
+      res.status(410).json({ error: 'Login/register is disabled. Device approval is used for access.', code: 'DEVICE_ONLY_ACCESS' });
     } catch (error) {
       next(error);
     }
@@ -125,7 +177,7 @@ export function createApiRouter(io) {
 
   router.post('/auth/login', async (req, res, next) => {
     try {
-      res.json(await loginUser(req, res, req.body || {}));
+      res.status(410).json({ error: 'Login/register is disabled. Device approval is used for access.', code: 'DEVICE_ONLY_ACCESS' });
     } catch (error) {
       next(error);
     }
@@ -396,6 +448,9 @@ export function createApiRouter(io) {
         type = 'text',
         text,
         mediaId,
+        storageBucket,
+        storagePath,
+        mediaSize,
         caption,
         mimeType,
         fileName,
@@ -466,6 +521,9 @@ export function createApiRouter(io) {
           textBody: text,
           caption,
           mediaId,
+          storageBucket,
+          storagePath,
+          mediaSize,
           mimeType,
           fileName,
           replyToWaMessageId,
@@ -504,10 +562,31 @@ export function createApiRouter(io) {
         fileName,
       });
 
+      let storedMedia = null;
+      try {
+        storedMedia = await storeMediaBuffer({
+          phoneNumberId: number.id,
+          source: 'uploads',
+          mediaId: uploadedMedia.id,
+          buffer: Buffer.from(uploadedMedia.buffer || req.body),
+          mimeType: uploadedMedia.mimeType,
+          fileName: uploadedMedia.fileName,
+        });
+      } catch (error) {
+        logger.warn('Media upload storage skipped', {
+          phoneNumberId: number.id,
+          mediaId: uploadedMedia.id,
+          error: error.message,
+        });
+      }
+
       res.json({
         mediaId: uploadedMedia.id,
         mimeType: uploadedMedia.mimeType,
         fileName: uploadedMedia.fileName,
+        storageBucket: storedMedia?.storageBucket || null,
+        storagePath: storedMedia?.storagePath || null,
+        mediaSize: storedMedia?.mediaSize || null,
       });
     } catch (error) {
       next(error);
@@ -683,6 +762,40 @@ export function createApiRouter(io) {
     }
   });
 
+  router.get('/chat-filter-settings', async (req, res, next) => {
+    try {
+      const phoneNumberId = Number(req.query.phoneNumberId);
+      if (!phoneNumberId) {
+        res.status(400).json({ error: 'phoneNumberId is required' });
+        return;
+      }
+
+      res.json(await repo.getChatFilterSettings(phoneNumberId));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.put('/chat-filter-settings', async (req, res, next) => {
+    try {
+      const phoneNumberId = Number(req.body?.phoneNumberId);
+      if (!phoneNumberId) {
+        res.status(400).json({ error: 'phoneNumberId is required' });
+        return;
+      }
+
+      const settings = await repo.saveChatFilterSettings(phoneNumberId, {
+        favoriteKeys: req.body?.favoriteKeys,
+        customFilters: req.body?.customFilters,
+      });
+
+      io.emit('chat-filter-settings:updated', settings);
+      res.json(settings);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.get('/messages/starred', async (req, res, next) => {
     try {
       const phoneNumberId = req.query.phoneNumberId ? Number(req.query.phoneNumberId) : null;
@@ -744,9 +857,29 @@ export function createApiRouter(io) {
   router.get('/messages/:messageId/media', async (req, res, next) => {
     try {
       const message = await repo.getMessageById(Number(req.params.messageId));
-      if (!message?.mediaId) {
+      if (!message?.mediaId && !message?.storagePath) {
         res.status(404).json({ error: 'Media not found' });
         return;
+      }
+
+      if (message.storagePath) {
+        try {
+          const storedMedia = await downloadStoredMedia({
+            storageBucket: message.storageBucket,
+            storagePath: message.storagePath,
+          });
+          sendMediaResponse(res, {
+            ...storedMedia,
+            mimeType: message.mimeType || storedMedia.mimeType,
+          }, message.fileName || storedMedia.fileName);
+          return;
+        } catch (error) {
+          logger.warn('Stored message media fetch failed; falling back to Meta', {
+            messageId: message.id,
+            storagePath: message.storagePath,
+            error: error.message,
+          });
+        }
       }
 
       const number = await repo.getBusinessNumberById(message.phoneNumberId);
@@ -760,11 +893,17 @@ export function createApiRouter(io) {
         mediaId: message.mediaId,
       });
 
-      res.setHeader('Content-Type', media.mimeType);
-      if (message.fileName) {
-        res.setHeader('Content-Disposition', `inline; filename="${message.fileName}"`);
+      try {
+        await persistDownloadedMessageMedia(message, media);
+      } catch (error) {
+        logger.warn('Message media persistence skipped after Meta download', {
+          messageId: message.id,
+          mediaId: message.mediaId,
+          error: error.message,
+        });
       }
-      res.send(Buffer.from(media.buffer));
+
+      sendMediaResponse(res, media, message.fileName);
     } catch (error) {
       next(error);
     }
@@ -818,9 +957,29 @@ export function createApiRouter(io) {
   router.get('/campaigns/:campaignId/media', async (req, res, next) => {
     try {
       const campaign = await repo.getCampaignById(Number(req.params.campaignId));
-      if (!campaign?.mediaId) {
+      if (!campaign?.mediaId && !campaign?.storagePath) {
         res.status(404).json({ error: 'Media not found' });
         return;
+      }
+
+      if (campaign.storagePath) {
+        try {
+          const storedMedia = await downloadStoredMedia({
+            storageBucket: campaign.storageBucket,
+            storagePath: campaign.storagePath,
+          });
+          sendMediaResponse(res, {
+            ...storedMedia,
+            mimeType: campaign.mimeType || storedMedia.mimeType,
+          }, campaign.fileName || storedMedia.fileName || 'campaign-media');
+          return;
+        } catch (error) {
+          logger.warn('Stored campaign media fetch failed; falling back to Meta', {
+            campaignId: campaign.id,
+            storagePath: campaign.storagePath,
+            error: error.message,
+          });
+        }
       }
 
       const number = await repo.getBusinessNumberById(campaign.phoneNumberId);
@@ -834,9 +993,17 @@ export function createApiRouter(io) {
         mediaId: campaign.mediaId,
       });
 
-      res.setHeader('Content-Type', media.mimeType);
-      res.setHeader('Content-Disposition', `inline; filename="${campaign.fileName || media.fileName || 'campaign-media'}"`);
-      res.send(Buffer.from(media.buffer));
+      try {
+        await persistDownloadedCampaignMedia(campaign, media);
+      } catch (error) {
+        logger.warn('Campaign media persistence skipped after Meta download', {
+          campaignId: campaign.id,
+          mediaId: campaign.mediaId,
+          error: error.message,
+        });
+      }
+
+      sendMediaResponse(res, media, campaign.fileName || media.fileName || 'campaign-media');
     } catch (error) {
       next(error);
     }

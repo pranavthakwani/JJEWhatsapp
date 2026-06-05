@@ -130,6 +130,22 @@ function getSupportedVoiceMimeType() {
   return VOICE_RECORDER_MIME_TYPES.find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) || '';
 }
 
+function getVoiceRecorderSupportError() {
+  if (typeof window !== 'undefined' && !window.isSecureContext) {
+    return 'Voice recording needs HTTPS. Use the live HTTPS domain or localhost.';
+  }
+
+  if (!navigator.mediaDevices?.getUserMedia) {
+    return 'Voice recording is not available in this browser.';
+  }
+
+  if (typeof MediaRecorder === 'undefined') {
+    return 'Voice recording is not supported in this browser.';
+  }
+
+  return '';
+}
+
 function getAudioExtension(mimeType: string) {
   const normalized = mimeType.toLowerCase();
   if (normalized.includes('ogg')) return 'ogg';
@@ -691,8 +707,9 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
   async function startVoiceRecording() {
     if (voiceMode === 'recording' || sending || recipientCount === 0) return;
 
-    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
-      setVoiceError('Voice recording is not supported in this browser.');
+    const supportError = getVoiceRecorderSupportError();
+    if (supportError) {
+      setVoiceError(supportError);
       return;
     }
 

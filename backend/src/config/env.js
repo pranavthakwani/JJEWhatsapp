@@ -32,6 +32,9 @@ export const env = {
     url: normaliseSupabaseUrl(process.env.SUPABASE_URL),
     serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
   },
+  media: {
+    bucket: process.env.SUPABASE_MEDIA_BUCKET || 'whatsapp-media',
+  },
   auth: {
     secret: process.env.AUTH_SECRET || process.env.JWT_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY,
     sessionCookieName: process.env.AUTH_SESSION_COOKIE_NAME || 'jjewa_session',

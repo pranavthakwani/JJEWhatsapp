@@ -14,6 +14,22 @@ import type {
   Template,
 } from '../types';
 
+export type ChatFilterMemberKey = `conversation:${number}` | `broadcast:${number}`;
+
+export type StoredChatFilter = {
+  id: string;
+  name: string;
+  memberKeys: ChatFilterMemberKey[];
+  createdAt: string;
+};
+
+export type ChatFilterSettings = {
+  phoneNumberId: number;
+  favoriteKeys: ChatFilterMemberKey[];
+  customFilters: StoredChatFilter[];
+  updatedAt?: string | null;
+};
+
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:4500/api',
   withCredentials: true,
@@ -123,16 +139,6 @@ export function cacheContactListCampaigns(contactListId: number, data: Campaign[
 
 export async function getAuthStatus() {
   const { data } = await api.get<AuthStatus>('/auth/status');
-  return data;
-}
-
-export async function login(payload: { email: string; password: string; rememberMe: boolean }) {
-  const { data } = await api.post<AuthStatus>('/auth/login', payload);
-  return data;
-}
-
-export async function register(payload: { name: string; email: string; password: string; rememberMe: boolean }) {
-  const { data } = await api.post<AuthStatus>('/auth/register', payload);
   return data;
 }
 
@@ -321,6 +327,19 @@ export async function getTemplates(phoneNumberId?: number | null) {
     params: { phoneNumberId },
   });
 
+  return data;
+}
+
+export async function getChatFilterSettings(phoneNumberId: number) {
+  const { data } = await api.get<ChatFilterSettings>('/chat-filter-settings', {
+    params: { phoneNumberId },
+  });
+
+  return data;
+}
+
+export async function saveChatFilterSettings(payload: Pick<ChatFilterSettings, 'phoneNumberId' | 'favoriteKeys' | 'customFilters'>) {
+  const { data } = await api.put<ChatFilterSettings>('/chat-filter-settings', payload);
   return data;
 }
 

@@ -1,11 +1,12 @@
 import { BellOff, Check, ChevronDown, Eraser, LogOut, Megaphone, Menu, MessageCircleMore, MessageSquarePlus, Moon, Plus, RefreshCw, Search, ShieldCheck, Star, SunMedium, Trash2, UserPlus, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent } from 'react';
-import type { AuthUser, BusinessNumber, ContactList, Conversation } from '../types';
+import { getChatFilterSettings, saveChatFilterSettings } from '../lib/api';
+import type { ChatFilterMemberKey, StoredChatFilter } from '../lib/api';
+import type { BusinessNumber, ContactList, Conversation } from '../types';
 
 type Props = {
   theme: 'dark' | 'light';
-  currentUser: AuthUser | null;
   numbers: BusinessNumber[];
   selectedPhoneNumberId: number | null;
   conversations: Conversation[];
@@ -22,7 +23,7 @@ type Props = {
   onRefresh: () => void;
   onOpenStarred: () => void;
   onOpenDevices: () => void;
-  onLogout: () => void;
+  onResetDevice: () => void;
   onComposeCampaign: () => void;
   onStartChat: () => void;
   onAddContact: () => void;
@@ -41,14 +42,6 @@ type ChatActionTarget =
 
 type ConfirmAction = 'clear' | 'delete';
 type ChatFilterMode = 'all' | 'unread' | 'favorites' | `custom:${string}`;
-type ChatFilterMemberKey = `conversation:${number}` | `broadcast:${number}`;
-
-type StoredChatFilter = {
-  id: string;
-  name: string;
-  memberKeys: ChatFilterMemberKey[];
-  createdAt: string;
-};
 
 type StoredChatFilterState = {
   favoriteKeys: ChatFilterMemberKey[];
@@ -155,7 +148,6 @@ function ConversationRowsSkeleton({ count = 7 }: { count?: number }) {
 
 export function ConversationList({
   theme,
-  currentUser,
   numbers,
   selectedPhoneNumberId,
   conversations,
@@ -172,7 +164,7 @@ export function ConversationList({
   onRefresh,
   onOpenStarred,
   onOpenDevices,
-  onLogout,
+  onResetDevice,
   onComposeCampaign,
   onStartChat,
   onAddContact,
@@ -206,6 +198,7 @@ export function ConversationList({
   const consumedLongPressRef = useRef('');
   const consumedFilterLongPressRef = useRef('');
   const filterStorageHydratingRef = useRef(true);
+  const filterSaveTimerRef = useRef<number | null>(null);
 
   const activeCustomFilter = useMemo(() => (
     chatFilter.startsWith('custom:')
@@ -262,20 +255,90 @@ export function ConversationList({
   ], [contactLists, conversations]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    if (filterSaveTimerRef.current) {
+      window.clearTimeout(filterSaveTimerRef.current);
+      filterSaveTimerRef.current = null;
+    }
+
     filterStorageHydratingRef.current = true;
-    const stored = loadStoredChatFilters(selectedPhoneNumberId);
-    setFavoriteKeys(stored.favoriteKeys);
-    setCustomFilters(stored.customFilters);
+    setFavoriteKeys([]);
+    setCustomFilters([]);
     setChatFilter('all');
+
+    async function loadFilters() {
+      const localState = loadStoredChatFilters(selectedPhoneNumberId);
+      if (!selectedPhoneNumberId) {
+        if (!cancelled) {
+          setFavoriteKeys(localState.favoriteKeys);
+          setCustomFilters(localState.customFilters);
+          filterStorageHydratingRef.current = false;
+        }
+        return;
+      }
+
+      try {
+        const remoteState = await getChatFilterSettings(selectedPhoneNumberId);
+        const remoteHasState = remoteState.favoriteKeys.length > 0 || remoteState.customFilters.length > 0;
+        const localHasState = localState.favoriteKeys.length > 0 || localState.customFilters.length > 0;
+        const nextState = remoteHasState ? remoteState : localState;
+
+        if (cancelled) return;
+        setFavoriteKeys(nextState.favoriteKeys);
+        setCustomFilters(nextState.customFilters);
+
+        if (!remoteHasState && localHasState) {
+          void saveChatFilterSettings({
+            phoneNumberId: selectedPhoneNumberId,
+            favoriteKeys: localState.favoriteKeys,
+            customFilters: localState.customFilters,
+          }).catch(() => {});
+        }
+      } catch {
+        if (cancelled) return;
+        setFavoriteKeys(localState.favoriteKeys);
+        setCustomFilters(localState.customFilters);
+      } finally {
+        if (!cancelled) {
+          window.setTimeout(() => {
+            filterStorageHydratingRef.current = false;
+          }, 0);
+        }
+      }
+    }
+
+    void loadFilters();
+
+    return () => {
+      cancelled = true;
+    };
   }, [selectedPhoneNumberId]);
 
   useEffect(() => {
-    if (filterStorageHydratingRef.current) {
-      filterStorageHydratingRef.current = false;
-      return;
-    }
+    if (filterStorageHydratingRef.current) return;
 
     saveStoredChatFilters(selectedPhoneNumberId, { favoriteKeys, customFilters });
+    if (!selectedPhoneNumberId) return;
+
+    if (filterSaveTimerRef.current) {
+      window.clearTimeout(filterSaveTimerRef.current);
+    }
+
+    filterSaveTimerRef.current = window.setTimeout(() => {
+      void saveChatFilterSettings({
+        phoneNumberId: selectedPhoneNumberId,
+        favoriteKeys,
+        customFilters,
+      }).catch(() => {});
+    }, 350);
+
+    return () => {
+      if (filterSaveTimerRef.current) {
+        window.clearTimeout(filterSaveTimerRef.current);
+        filterSaveTimerRef.current = null;
+      }
+    };
   }, [customFilters, favoriteKeys, selectedPhoneNumberId]);
 
   useEffect(() => {
@@ -623,15 +686,13 @@ export function ConversationList({
                 <UserPlus size={21} />
                 <span>Add contact</span>
               </button>
-              {currentUser?.role === 'admin' && (
-                <button type="button" onClick={() => runDrawerAction(onOpenDevices)}>
-                  <ShieldCheck size={21} />
-                  <span>Devices</span>
-                </button>
-              )}
-              <button type="button" onClick={() => runDrawerAction(onLogout)}>
+              <button type="button" onClick={() => runDrawerAction(onOpenDevices)}>
+                <ShieldCheck size={21} />
+                <span>Devices</span>
+              </button>
+              <button type="button" onClick={() => runDrawerAction(onResetDevice)}>
                 <LogOut size={21} />
-                <span>Logout</span>
+                <span>Reset device</span>
               </button>
             </nav>
           </section>

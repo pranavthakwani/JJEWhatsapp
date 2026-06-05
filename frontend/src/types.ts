@@ -11,16 +11,6 @@ export type BusinessNumber = {
   status: string;
 };
 
-export type AuthUser = {
-  id: number;
-  name: string;
-  email: string;
-  role: 'admin' | 'user' | string;
-  status: string;
-  createdAt: string;
-  updatedAt: string | null;
-};
-
 export type AuthDevice = {
   id: number;
   deviceCode: string;
@@ -38,7 +28,7 @@ export type AuthDevice = {
 export type AuthStatus = {
   authenticated: boolean;
   canUseApp: boolean;
-  user: AuthUser | null;
+  user: null;
   device: AuthDevice | null;
 };
 

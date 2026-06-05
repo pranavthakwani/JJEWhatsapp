@@ -198,6 +198,9 @@ function mapMessage(row) {
     caption: row.caption,
     mediaId: row.media_id,
     mediaUrl: row.media_url,
+    storageBucket: row.storage_bucket || null,
+    storagePath: row.storage_path || null,
+    mediaSize: row.media_size || null,
     mimeType: row.mime_type,
     fileName: row.file_name,
     templateName: row.template_name,
@@ -237,6 +240,36 @@ function mapTemplate(row) {
   };
 }
 
+function normaliseChatFilterMemberKeys(value) {
+  return Array.isArray(value)
+    ? value
+      .map((item) => String(item || '').trim())
+      .filter((item) => /^(conversation|broadcast):\d+$/.test(item))
+    : [];
+}
+
+function normaliseCustomChatFilters(value) {
+  return Array.isArray(value)
+    ? value
+      .map((filter) => ({
+        id: String(filter?.id || '').trim(),
+        name: String(filter?.name || '').trim(),
+        memberKeys: normaliseChatFilterMemberKeys(filter?.memberKeys),
+        createdAt: filter?.createdAt || new Date().toISOString(),
+      }))
+      .filter((filter) => filter.id && filter.name)
+    : [];
+}
+
+function mapChatFilterSettings(row, phoneNumberId) {
+  return {
+    phoneNumberId,
+    favoriteKeys: normaliseChatFilterMemberKeys(row?.favorite_keys),
+    customFilters: normaliseCustomChatFilters(row?.custom_filters),
+    updatedAt: row?.updated_at || null,
+  };
+}
+
 function mapCampaign(row) {
   if (!row) return null;
 
@@ -248,6 +281,9 @@ function mapCampaign(row) {
     mode: row.mode,
     bodyText: row.body_text,
     mediaId: row.media_id || null,
+    storageBucket: row.storage_bucket || null,
+    storagePath: row.storage_path || null,
+    mediaSize: row.media_size || null,
     mimeType: row.mime_type || null,
     fileName: row.file_name || null,
     templateName: row.template_name,
@@ -972,34 +1008,39 @@ export async function listConversations({ phoneNumberId, search, limit = 40, cur
 }
 
 export async function insertMessage(message) {
+  const payload = {
+    conversation_id: message.conversationId,
+    phone_number_id: message.phoneNumberId,
+    contact_id: message.contactId,
+    direction: message.direction,
+    message_type: message.messageType,
+    wa_message_id: message.waMessageId || null,
+    parent_wa_message_id: message.parentWaMessageId || null,
+    text_body: message.textBody || null,
+    caption: message.caption || null,
+    media_id: message.mediaId || null,
+    media_url: message.mediaUrl || null,
+    storage_bucket: message.storageBucket || null,
+    storage_path: message.storagePath || null,
+    media_size: message.mediaSize || null,
+    mime_type: message.mimeType || null,
+    file_name: message.fileName || null,
+    template_name: message.templateName || null,
+    template_language: message.templateLanguage || null,
+    template_params: message.templateParams || null,
+    campaign_id: message.campaignId || null,
+    status: message.status || 'queued',
+    error_message: message.errorMessage || null,
+    wa_timestamp: toIso(message.waTimestamp),
+    sent_at: toIso(message.sentAt),
+    delivered_at: toIso(message.deliveredAt),
+    read_at: toIso(message.readAt),
+    failed_at: toIso(message.failedAt),
+  };
+
   const inserted = await supabase
     .from('wa_messages')
-    .insert({
-      conversation_id: message.conversationId,
-      phone_number_id: message.phoneNumberId,
-      contact_id: message.contactId,
-      direction: message.direction,
-      message_type: message.messageType,
-      wa_message_id: message.waMessageId || null,
-      parent_wa_message_id: message.parentWaMessageId || null,
-      text_body: message.textBody || null,
-      caption: message.caption || null,
-      media_id: message.mediaId || null,
-      media_url: message.mediaUrl || null,
-      mime_type: message.mimeType || null,
-      file_name: message.fileName || null,
-      template_name: message.templateName || null,
-      template_language: message.templateLanguage || null,
-      template_params: message.templateParams || null,
-      campaign_id: message.campaignId || null,
-      status: message.status || 'queued',
-      error_message: message.errorMessage || null,
-      wa_timestamp: toIso(message.waTimestamp),
-      sent_at: toIso(message.sentAt),
-      delivered_at: toIso(message.deliveredAt),
-      read_at: toIso(message.readAt),
-      failed_at: toIso(message.failedAt),
-    })
+    .insert(payload)
     .select('*')
     .single();
 
@@ -1049,6 +1090,33 @@ export async function getMessageById(id) {
     .maybeSingle();
 
   return mapMessage(requireData(result));
+}
+
+export async function updateMessageMediaStorage(messageId, {
+  storageBucket,
+  storagePath,
+  mediaSize,
+  mimeType,
+  fileName,
+}) {
+  const payload = {
+    storage_bucket: storageBucket || null,
+    storage_path: storagePath || null,
+    media_size: mediaSize || null,
+    updated_at: new Date().toISOString(),
+  };
+
+  if (mimeType !== undefined) payload.mime_type = mimeType || null;
+  if (fileName !== undefined) payload.file_name = fileName || null;
+
+  const updated = await supabase
+    .from('wa_messages')
+    .update(payload)
+    .eq('id', messageId)
+    .select('*')
+    .maybeSingle();
+
+  return mapMessage(requireData(updated));
 }
 
 export async function setMessageStarred(messageId, starred) {
@@ -1228,6 +1296,35 @@ export async function listTemplates(phoneNumberId = null) {
 
   const rows = requireData(await query);
   return rows.map(mapTemplate);
+}
+
+export async function getChatFilterSettings(phoneNumberId) {
+  const row = requireData(await supabase
+    .from('wa_chat_filter_settings')
+    .select('*')
+    .eq('phone_number_id', phoneNumberId)
+    .maybeSingle());
+
+  return mapChatFilterSettings(row, phoneNumberId);
+}
+
+export async function saveChatFilterSettings(phoneNumberId, state = {}) {
+  const favoriteKeys = normaliseChatFilterMemberKeys(state.favoriteKeys);
+  const customFilters = normaliseCustomChatFilters(state.customFilters);
+  const row = requireData(await supabase
+    .from('wa_chat_filter_settings')
+    .upsert({
+      phone_number_id: phoneNumberId,
+      favorite_keys: favoriteKeys,
+      custom_filters: customFilters,
+      updated_at: new Date().toISOString(),
+    }, {
+      onConflict: 'phone_number_id',
+    })
+    .select('*')
+    .single());
+
+  return mapChatFilterSettings(row, phoneNumberId);
 }
 
 export async function replaceTemplates(phoneNumberId, templates) {
@@ -1420,6 +1517,9 @@ export async function createCampaign({
   mode,
   bodyText,
   mediaId = null,
+  storageBucket = null,
+  storagePath = null,
+  mediaSize = null,
   mimeType = null,
   fileName = null,
   templateName,
@@ -1451,6 +1551,9 @@ export async function createCampaign({
       mode,
       body_text: bodyText || null,
       media_id: mediaId || null,
+      storage_bucket: storageBucket || null,
+      storage_path: storagePath || null,
+      media_size: mediaSize || null,
       mime_type: mimeType || null,
       file_name: fileName || null,
       template_name: templateName || null,
@@ -1571,6 +1674,33 @@ export async function getCampaignById(id) {
   };
 }
 
+export async function updateCampaignMediaStorage(campaignId, {
+  storageBucket,
+  storagePath,
+  mediaSize,
+  mimeType,
+  fileName,
+}) {
+  const payload = {
+    storage_bucket: storageBucket || null,
+    storage_path: storagePath || null,
+    media_size: mediaSize || null,
+    updated_at: new Date().toISOString(),
+  };
+
+  if (mimeType !== undefined) payload.mime_type = mimeType || null;
+  if (fileName !== undefined) payload.file_name = fileName || null;
+
+  const updated = await supabase
+    .from('wa_campaigns')
+    .update(payload)
+    .eq('id', campaignId)
+    .select('*')
+    .maybeSingle();
+
+  return mapCampaign(requireData(updated));
+}
+
 export async function getDispatchableCampaigns(limit = 3) {
   const rows = requireData(await supabase
     .from('wa_campaigns')
@@ -1678,6 +1808,9 @@ export async function getPendingOptInRecipientsForContact({ phoneNumberId, conta
         mode,
         body_text,
         media_id,
+        storage_bucket,
+        storage_path,
+        media_size,
         mime_type,
         file_name,
         template_name,
@@ -1827,6 +1960,9 @@ export async function createConversationMessageFromSend({
     textBody: payload.textBody || null,
     caption: payload.caption || null,
     mediaId: payload.mediaId || null,
+    storageBucket: payload.storageBucket || null,
+    storagePath: payload.storagePath || null,
+    mediaSize: payload.mediaSize || null,
     mimeType: payload.mimeType || null,
     fileName: payload.fileName || null,
     templateName: payload.templateName || null,
