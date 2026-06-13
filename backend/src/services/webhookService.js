@@ -1,10 +1,7 @@
 import * as repo from './chatRepository.js';
-import { downloadMediaContent, sendMediaMessage, sendTextMessage } from './metaCloudService.js';
-import { storeMediaBuffer } from './mediaStorageService.js';
+import { sendMediaMessage, sendTextMessage } from './metaCloudService.js';
 import { buildMessagePreview, extractInboundMessageParts, toDateFromUnixSeconds } from '../utils/messageFormat.js';
 import { logger } from '../utils/logger.js';
-
-const MEDIA_MESSAGE_TYPES = new Set(['image', 'video', 'audio', 'document', 'sticker']);
 
 function mapStatus(status) {
   switch (status) {
@@ -46,44 +43,6 @@ function formatStatusErrors(errors) {
 
 function isMediaCampaign(campaign) {
   return ['image', 'video', 'audio', 'document'].includes(campaign?.mode);
-}
-
-async function persistInboundMedia({ message, number, io }) {
-  if (!MEDIA_MESSAGE_TYPES.has(message?.messageType) || !message?.mediaId) return;
-
-  try {
-    const media = await downloadMediaContent({
-      number,
-      mediaId: message.mediaId,
-    });
-
-    const stored = await storeMediaBuffer({
-      phoneNumberId: number.id,
-      source: 'inbound',
-      mediaId: message.mediaId,
-      buffer: Buffer.from(media.buffer),
-      mimeType: media.mimeType || message.mimeType || 'application/octet-stream',
-      fileName: message.fileName || message.mediaId,
-    });
-
-    const updated = await repo.updateMessageMediaStorage(message.id, {
-      storageBucket: stored.storageBucket,
-      storagePath: stored.storagePath,
-      mediaSize: stored.mediaSize,
-      mimeType: stored.mimeType,
-      fileName: message.fileName || stored.fileName,
-    });
-
-    if (updated) {
-      io.emit('message:status', updated);
-    }
-  } catch (error) {
-    logger.warn('Inbound media persistence skipped', {
-      messageId: message.id,
-      mediaId: message.mediaId,
-      error: error.message,
-    });
-  }
 }
 
 async function sendDeferredCampaignMessage({ number, campaign, contact }) {
@@ -206,7 +165,6 @@ export async function handleMetaWebhook(payload, io) {
         const conversation = await repo.getConversationById(conversationId);
         io.emit('conversation:updated', conversation);
         io.emit('message:created', inserted);
-        void persistInboundMedia({ message: inserted, number, io });
 
         if (isPositiveOptInReply(inserted.textBody)) {
           await repo.setContactOptInState(contact.id, {

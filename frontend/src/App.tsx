@@ -8,7 +8,11 @@ import { AuthLoadingScreen, PendingDeviceScreen } from './components/AuthScreens
 import { AddContactDialog, StartChatDialog } from './components/ContactDialogs';
 import { DeviceManagerDialog } from './components/DeviceManagerDialog';
 import {
+  cacheMessageMedia,
+  cacheMessageSnapshot,
   clearContactList,
+  clearCachedConversationData,
+  clearCachedMessageMedia,
   clearConversation,
   createCampaign,
   deleteContactList,
@@ -27,6 +31,7 @@ import {
   listAuthDevices,
   logout as logoutAuth,
   markConversationRead,
+  renameContact,
   sendConversationOptInTemplate,
   sendConversationMessage,
   starMessage,
@@ -206,6 +211,7 @@ export default function App() {
   const readInFlightRef = useRef<number | null>(null);
   const themeTransitionTimeoutRef = useRef<number | null>(null);
   const authStatusPromiseRef = useRef<Promise<AuthStatus | null> | null>(null);
+  const messageLoadRequestRef = useRef(0);
   const isChatOpen = Boolean(activeConversation || activeContactListId);
   const canUseApp = authStatus?.canUseApp === true;
 
@@ -423,9 +429,15 @@ export default function App() {
   }
 
   async function loadMessages(conversationId: number, reset = true) {
+    const requestId = ++messageLoadRequestRef.current;
     let showedCached = false;
     if (reset) {
-      const cachedPayload = getCachedMessages(conversationId);
+      setMessages([]);
+      setMessageCursor(null);
+
+      const cachedPayload = await getCachedMessages(conversationId);
+      if (messageLoadRequestRef.current !== requestId) return;
+
       if (cachedPayload) {
         showedCached = true;
         setMessages(cachedPayload.items);
@@ -439,11 +451,14 @@ export default function App() {
         cursor: reset ? null : messageCursor,
         limit: 30,
       });
+      if (messageLoadRequestRef.current !== requestId) return;
 
       setMessages((current) => (reset ? payload.items : [...payload.items, ...current]));
       setMessageCursor(payload.nextCursor);
     } finally {
-      setMessageLoading(false);
+      if (messageLoadRequestRef.current === requestId) {
+        setMessageLoading(false);
+      }
     }
   }
 
@@ -541,6 +556,13 @@ export default function App() {
   }, [activeConversation?.id]);
 
   useEffect(() => {
+    if (!activeConversation || messages.length === 0) return;
+    if (messages.some((message) => message.conversationId !== activeConversation.id)) return;
+
+    cacheMessageSnapshot(activeConversation.id, messages, messageCursor);
+  }, [activeConversation?.id, messages, messageCursor]);
+
+  useEffect(() => {
     function handleConversationUpdated(conversation: Conversation) {
       if (conversation.phoneNumberId !== selectedPhoneNumberId) return;
 
@@ -577,7 +599,15 @@ export default function App() {
           const withoutReplacedReaction = message.messageType === 'reaction'
             ? removeReplacedReaction(current, message.parentWaMessageId, message.direction, message.id)
             : current;
-          return sortMessages([...withoutReplacedReaction, message]);
+          const withoutOptimisticMedia = message.direction === 'outbound' && ['image', 'video', 'audio', 'document'].includes(message.messageType)
+            ? withoutReplacedReaction.filter((item) => !(
+              item.id < 0
+              && item.direction === 'outbound'
+              && item.messageType === message.messageType
+              && item.status === 'queued'
+            ))
+            : withoutReplacedReaction;
+          return sortMessages([...withoutOptimisticMedia, message]);
         });
 
         if (message.direction === 'inbound') {
@@ -588,6 +618,7 @@ export default function App() {
 
     function handleMessageStatus(message: Message) {
       if (message.deletedAt) {
+        clearCachedMessageMedia(message.id);
         setMessages((current) => current.filter((item) => item.id !== message.id));
         return;
       }
@@ -613,11 +644,13 @@ export default function App() {
     }
 
     function handleMessageDeleted(message: Message) {
+      clearCachedMessageMedia(message.id);
       setMessages((current) => current.filter((item) => item.id !== message.id));
     }
 
     function handleConversationDeleted(payload: { id: number; phoneNumberId: number }) {
       if (payload.phoneNumberId !== selectedPhoneNumberId) return;
+      clearCachedConversationData(payload.id);
       setConversations((current) => current.filter((conversation) => conversation.id !== payload.id));
       setActiveConversation((current) => (current?.id === payload.id ? null : current));
       if (activeConversation?.id === payload.id) {
@@ -639,6 +672,52 @@ export default function App() {
       setActiveContactList((current) => (current?.id === list.id ? list : current));
     }
 
+    function handleContactUpdated(contact: Contact) {
+      const contactName = contact.businessDirectoryName || contact.profileName || contact.phoneNumber || contact.waId;
+
+      setConversations((current) => current.map((conversation) => (
+        conversation.contactId === contact.id
+          ? {
+              ...conversation,
+              contactName,
+              contactPhone: contact.phoneNumber,
+              contactWaId: contact.waId,
+              contactOptInStatus: contact.optInStatus,
+              contactOptInUpdatedAt: contact.optInUpdatedAt,
+              contactLastOptInTemplateName: contact.lastOptInTemplateName,
+              contactLastOptInPromptAt: contact.lastOptInPromptAt,
+              contactLastInboundAt: contact.lastInboundAt,
+              contactLastOutboundAt: contact.lastOutboundAt,
+            }
+          : conversation
+      )));
+      setActiveConversation((current) => (
+        current?.contactId === contact.id
+          ? {
+              ...current,
+              contactName,
+              contactPhone: contact.phoneNumber,
+              contactWaId: contact.waId,
+              contactOptInStatus: contact.optInStatus,
+              contactOptInUpdatedAt: contact.optInUpdatedAt,
+              contactLastOptInTemplateName: contact.lastOptInTemplateName,
+              contactLastOptInPromptAt: contact.lastOptInPromptAt,
+              contactLastInboundAt: contact.lastInboundAt,
+              contactLastOutboundAt: contact.lastOutboundAt,
+            }
+          : current
+      ));
+
+      const updateListContact = (list: ContactList) => ({
+        ...list,
+        members: list.members?.map((member) => (
+          member.contact.id === contact.id ? { ...member, contact } : member
+        )),
+      });
+      setContactLists((current) => current.map(updateListContact));
+      setActiveContactList((current) => (current ? updateListContact(current) : current));
+    }
+
     function handleContactListDeleted(payload: { id: number; phoneNumberId: number }) {
       if (payload.phoneNumberId !== selectedPhoneNumberId) return;
       setContactLists((current) => current.filter((list) => list.id !== payload.id));
@@ -651,6 +730,7 @@ export default function App() {
     socket.on('message:created', handleMessageCreated);
     socket.on('message:status', handleMessageStatus);
     socket.on('message:deleted', handleMessageDeleted);
+    socket.on('contact:updated', handleContactUpdated);
     socket.on('contact-list:updated', handleContactListUpdated);
     socket.on('contact-list:deleted', handleContactListDeleted);
 
@@ -660,6 +740,7 @@ export default function App() {
       socket.off('message:created', handleMessageCreated);
       socket.off('message:status', handleMessageStatus);
       socket.off('message:deleted', handleMessageDeleted);
+      socket.off('contact:updated', handleContactUpdated);
       socket.off('contact-list:updated', handleContactListUpdated);
       socket.off('contact-list:deleted', handleContactListDeleted);
     };
@@ -768,6 +849,7 @@ export default function App() {
       caption: caption || null,
       mediaId: null,
       mediaUrl: localPreviewUrl,
+      uploadProgress: 0,
       mimeType: file.type || null,
       fileName: file.name,
       templateName: null,
@@ -799,7 +881,13 @@ export default function App() {
     setSending(true);
 
     try {
-      const upload = await uploadMedia(activeConversation.phoneNumberId, file);
+      const upload = await uploadMedia(activeConversation.phoneNumberId, file, (progress) => {
+        setMessages((current) => current.map((item) => (
+          item.id === optimisticId
+            ? { ...item, uploadProgress: progress }
+            : item
+        )));
+      });
       const sentMessage = await sendConversationMessage(activeConversation.id, {
         type: mediaType,
         mediaId: upload.mediaId,
@@ -808,6 +896,7 @@ export default function App() {
         fileName: upload.fileName || file.name,
         replyToWaMessageId: replyToWaMessageId || null,
       });
+      cacheMessageMedia(sentMessage, file, localPreviewUrl);
       URL.revokeObjectURL(localPreviewUrl);
       setMessages((current) => {
         const withoutOptimistic = current.filter((item) => item.id !== optimisticId);
@@ -935,6 +1024,7 @@ export default function App() {
 
     try {
       const result = await deleteMessage(message.id);
+      clearCachedMessageMedia(result.message.id);
       setMessages((current) => current.filter((item) => item.id !== result.message.id));
       setConversations((current) => upsertConversation(current, result.conversation));
       setActiveConversation((current) => (
@@ -1077,6 +1167,7 @@ export default function App() {
 
   async function handleClearConversation(conversationId: number) {
     const updatedConversation = await clearConversation(conversationId);
+    clearCachedConversationData(conversationId);
     setConversations((current) => upsertConversation(current, updatedConversation));
     setActiveConversation((current) => (current?.id === conversationId ? updatedConversation : current));
 
@@ -1088,6 +1179,7 @@ export default function App() {
 
   async function handleDeleteConversation(conversationId: number) {
     await deleteConversation(conversationId);
+    clearCachedConversationData(conversationId);
     setConversations((current) => current.filter((conversation) => conversation.id !== conversationId));
 
     if (activeConversation?.id === conversationId) {
@@ -1246,6 +1338,32 @@ export default function App() {
               onDeleteMessage={handleDeleteMessage}
               onForwardMessage={openForwardDialog}
               onSendOptInTemplate={handleSendOptInTemplate}
+              onRenameContact={async (name) => {
+                if (!activeConversation) return;
+
+                const contact = await renameContact(activeConversation.contactId, name);
+                const contactName = contact.businessDirectoryName || contact.profileName || contact.phoneNumber || contact.waId;
+                setConversations((current) => current.map((conversation) => (
+                  conversation.contactId === contact.id ? { ...conversation, contactName } : conversation
+                )));
+                setActiveConversation((current) => (
+                  current?.contactId === contact.id ? { ...current, contactName } : current
+                ));
+                setContactLists((current) => current.map((list) => ({
+                  ...list,
+                  members: list.members?.map((member) => (
+                    member.contact.id === contact.id ? { ...member, contact } : member
+                  )),
+                })));
+                setActiveContactList((current) => current
+                  ? {
+                      ...current,
+                      members: current.members?.map((member) => (
+                        member.contact.id === contact.id ? { ...member, contact } : member
+                      )),
+                    }
+                  : current);
+              }}
               onToggleMute={() => {
                 if (!activeConversation) return;
                 setMutedConversationIds((current) => (

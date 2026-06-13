@@ -19,7 +19,7 @@ type AddContactDialogProps = {
 };
 
 function getContactName(contact: Contact) {
-  return contact.profileName || contact.businessDirectoryName || contact.phoneNumber || contact.waId;
+  return contact.businessDirectoryName || contact.profileName || contact.phoneNumber || contact.waId;
 }
 
 function isAlphabeticContact(contact: Contact) {

@@ -1,6 +1,6 @@
 import express from 'express';
 import * as repo from '../services/chatRepository.js';
-import { downloadMediaContent, getBusinessProfile, listMessageTemplates, markMessageAsRead, sendMediaMessage, sendReactionMessage, sendTemplateMessage, sendTextMessage, uploadMedia } from '../services/metaCloudService.js';
+import { downloadMediaContent, getBusinessProfile, getMediaDownloadStream, listMessageTemplates, markMessageAsRead, sendMediaMessage, sendReactionMessage, sendTemplateMessage, sendTextMessage, uploadMedia } from '../services/metaCloudService.js';
 import { downloadStoredMedia, storeMediaBuffer } from '../services/mediaStorageService.js';
 import { parseBusinessDirectoryWorkbook, parseUploadedWorkbook } from '../services/businessContactDirectory.js';
 import { handleMetaWebhook } from '../services/webhookService.js';
@@ -649,6 +649,24 @@ export function createApiRouter(io) {
     }
   });
 
+  router.patch('/contacts/:contactId', async (req, res, next) => {
+    try {
+      const contact = await repo.renameContact({
+        contactId: Number(req.params.contactId),
+        name: req.body?.name,
+      });
+      if (!contact) {
+        res.status(404).json({ error: 'Contact not found' });
+        return;
+      }
+
+      io.emit('contact:updated', contact);
+      res.json(contact);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.post('/contacts/import/business-directory', async (_req, res, next) => {
     try {
       const { workbookPath, contacts } = parseBusinessDirectoryWorkbook();
@@ -704,6 +722,24 @@ export function createApiRouter(io) {
       });
 
       res.status(201).json(list);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.patch('/contact-lists/:listId', async (req, res, next) => {
+    try {
+      const list = await repo.renameContactList({
+        listId: Number(req.params.listId),
+        name: req.body?.name,
+      });
+      if (!list) {
+        res.status(404).json({ error: 'Broadcast list not found' });
+        return;
+      }
+
+      io.emit('contact-list:updated', list);
+      res.json(list);
     } catch (error) {
       next(error);
     }
@@ -888,22 +924,63 @@ export function createApiRouter(io) {
         return;
       }
 
-      const media = await downloadMediaContent({
+      const media = await getMediaDownloadStream({
         number,
         mediaId: message.mediaId,
       });
 
-      try {
-        await persistDownloadedMessageMedia(message, media);
-      } catch (error) {
-        logger.warn('Message media persistence skipped after Meta download', {
-          messageId: message.id,
-          mediaId: message.mediaId,
-          error: error.message,
-        });
+      const chunks = [];
+      let mediaSize = 0;
+      let clientClosed = false;
+
+      res.setHeader('Content-Type', media.mimeType || message.mimeType || 'application/octet-stream');
+      res.setHeader('Content-Disposition', `inline; filename="${sanitizeDownloadFileName(message.fileName || message.mediaId)}"`);
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      if (media.contentLength) {
+        res.setHeader('Content-Length', String(media.contentLength));
       }
 
-      sendMediaResponse(res, media, message.fileName);
+      req.on('close', () => {
+        clientClosed = true;
+        media.stream.destroy();
+      });
+
+      media.stream.on('data', (chunk) => {
+        const buffer = Buffer.from(chunk);
+        chunks.push(buffer);
+        mediaSize += buffer.length;
+      });
+
+      media.stream.on('error', (error) => {
+        if (!res.headersSent) {
+          next(error);
+          return;
+        }
+
+        res.destroy(error);
+      });
+
+      media.stream.on('end', async () => {
+        if (clientClosed) return;
+
+        try {
+          const updatedMessage = await persistDownloadedMessageMedia(message, {
+            buffer: Buffer.concat(chunks, mediaSize),
+            mimeType: media.mimeType || message.mimeType || 'application/octet-stream',
+          });
+          if (updatedMessage) {
+            io.emit('message:status', updatedMessage);
+          }
+        } catch (error) {
+          logger.warn('Message media persistence skipped after Meta download', {
+            messageId: message.id,
+            mediaId: message.mediaId,
+            error: error.message,
+          });
+        }
+      });
+
+      media.stream.pipe(res);
     } catch (error) {
       next(error);
     }

@@ -14,6 +14,7 @@ import {
   Mic,
   MoreVertical,
   Paperclip,
+  Pencil,
   Play,
   Plus,
   Reply,
@@ -22,21 +23,23 @@ import {
   Smile,
   Star,
   Trash2,
+  Upload,
   X,
 } from 'lucide-react';
-import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
-import { getMediaUrl } from '../lib/api';
+import { Suspense, lazy, useEffect, useMemo, useRef, useState, type CSSProperties, type SyntheticEvent } from 'react';
+import { cacheMessageMedia, getCachedMessageMedia, getMediaUrl } from '../lib/api';
 import type { Conversation, Message } from '../types';
 import type { EmojiClickData } from 'emoji-picker-react';
 
 const EmojiPicker = lazy(() => import('emoji-picker-react'));
 const CUSTOMER_SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const COMPOSER_MAX_TEXTAREA_HEIGHT = 176;
+const OLDER_MESSAGES_AUTOLOAD_OFFSET_PX = 320;
 const VOICE_RECORDER_MIME_TYPES = [
   'audio/ogg;codecs=opus',
-  'audio/mp4',
   'audio/webm;codecs=opus',
   'audio/webm',
+  'audio/mp4',
 ];
 
 type Props = {
@@ -55,16 +58,22 @@ type Props = {
   onDeleteMessage: (message: Message) => Promise<void>;
   onForwardMessage: (message: Message) => void;
   onSendOptInTemplate: (templateKind: 'auto' | 'intro' | 'followup') => Promise<void>;
+  onRenameContact: (name: string) => Promise<void>;
   onToggleMute: () => void;
   onBack?: () => void;
 };
 
 type MediaViewerState = {
+  messageId: number;
   type: 'image' | 'video' | 'audio' | 'document';
   src: string;
   caption: string | null;
   fileName: string | null;
   mimeType: string | null;
+};
+
+type MediaDownloadState = {
+  progress: number | null;
 };
 
 const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '🙏'];
@@ -205,8 +214,44 @@ function isPreviewableDocumentTarget(mimeType: string | null, fileName: string |
   return mime.includes('pdf') || name.endsWith('.pdf');
 }
 
-function getMediaSource(message: Message) {
-  return message.mediaUrl || getMediaUrl(message.id);
+function getMediaSource(message: Message, localMediaUrl?: string | null) {
+  return localMediaUrl || message.mediaUrl || getMediaUrl(message.id);
+}
+
+function getMediaCacheHydrationKey(message: Message) {
+  return `${message.id}:${message.messageType}:${message.mediaId || message.storagePath || message.mediaUrl || ''}`;
+}
+
+function isMediaDownloaded(message: Message, localMediaUrl?: string | null) {
+  return message.direction !== 'inbound' || Boolean(localMediaUrl || message.mediaUrl || message.storagePath);
+}
+
+function formatMediaSize(size?: number | null) {
+  if (!size) return '';
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.ceil(size / 1024)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(size < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
+
+function isMediaUploading(message: Message) {
+  return message.direction === 'outbound' && isMediaLikeMessage(message) && !message.mediaId && message.status === 'queued';
+}
+
+function MediaTransferOverlay({
+  direction,
+  progress,
+}: {
+  direction: 'download' | 'upload';
+  progress: number;
+}) {
+  return (
+    <span
+      className={`bubble__transfer-pill bubble__transfer-pill--${direction}`}
+      style={{ '--download-progress': `${Math.max(0, Math.min(progress, 1)) * 360}deg` } as CSSProperties}
+    >
+      {direction === 'upload' ? <Upload size={22} /> : <Download size={18} />}
+    </span>
+  );
 }
 
 function isMediaLikeMessage(message: Message) {
@@ -215,6 +260,25 @@ function isMediaLikeMessage(message: Message) {
 
 function getMediaCaption(message: Message) {
   return message.caption || (isMediaLikeMessage(message) ? message.textBody : null) || null;
+}
+
+function isDuplicateMediaTimestampMessage(message: Message, previousMessage: Message | null) {
+  if (!previousMessage || !isMediaLikeMessage(previousMessage)) return false;
+  if (message.messageType !== 'text' || message.deletedAt) return false;
+  if (message.conversationId !== previousMessage.conversationId || message.direction !== previousMessage.direction) return false;
+
+  const text = (message.textBody || message.caption || '').trim().toLowerCase();
+  if (!text) return false;
+
+  const previousTime = formatBubbleTime(previousMessage.createdAt).trim().toLowerCase();
+  const messageTime = formatBubbleTime(message.createdAt).trim().toLowerCase();
+  if (text !== previousTime && text !== messageTime) return false;
+
+  const previousCreatedAt = new Date(previousMessage.createdAt).getTime();
+  const messageCreatedAt = new Date(message.createdAt).getTime();
+  return Number.isFinite(previousCreatedAt)
+    && Number.isFinite(messageCreatedAt)
+    && Math.abs(messageCreatedAt - previousCreatedAt) <= 60 * 1000;
 }
 
 function getMessagePreviewCopy(message: Message) {
@@ -242,10 +306,12 @@ function ImagePreviewBubble({
   message,
   query,
   onOpenMedia,
+  localMediaUrl,
 }: {
   message: Message;
   query: string;
   onOpenMedia: (viewer: MediaViewerState) => void;
+  localMediaUrl?: string | null;
 }) {
   const [loaded, setLoaded] = useState(false);
   const [variant, setVariant] = useState<'portrait' | 'square' | 'landscape'>('landscape');
@@ -257,8 +323,9 @@ function ImagePreviewBubble({
         type="button"
         className="bubble__media-button"
         onClick={() => onOpenMedia({
+          messageId: message.id,
           type: 'image',
-          src: getMediaSource(message),
+          src: getMediaSource(message, localMediaUrl),
           caption: mediaCaption,
           fileName: message.fileName || 'Image',
           mimeType: message.mimeType || null,
@@ -268,13 +335,14 @@ function ImagePreviewBubble({
           <img
             loading="lazy"
             decoding="async"
-            src={getMediaSource(message)}
+            src={getMediaSource(message, localMediaUrl)}
             alt={mediaCaption || 'Image'}
             onLoad={(event) => {
               setVariant(getPreviewVariant(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight));
               setLoaded(true);
             }}
           />
+          {isMediaUploading(message) && <MediaTransferOverlay direction="upload" progress={message.uploadProgress ?? 0} />}
         </span>
       </button>
       {mediaCaption && <p className="bubble__media-caption">{highlightText(mediaCaption, query)}</p>}
@@ -286,10 +354,12 @@ function VideoPreviewBubble({
   message,
   query,
   onOpenMedia,
+  localMediaUrl,
 }: {
   message: Message;
   query: string;
   onOpenMedia: (viewer: MediaViewerState) => void;
+  localMediaUrl?: string | null;
 }) {
   const [loaded, setLoaded] = useState(false);
   const [variant, setVariant] = useState<'portrait' | 'square' | 'landscape'>('landscape');
@@ -301,8 +371,9 @@ function VideoPreviewBubble({
         type="button"
         className="bubble__media-button"
         onClick={() => onOpenMedia({
+          messageId: message.id,
           type: 'video',
-          src: getMediaSource(message),
+          src: getMediaSource(message, localMediaUrl),
           caption: mediaCaption,
           fileName: message.fileName || 'Video',
           mimeType: message.mimeType || null,
@@ -313,7 +384,7 @@ function VideoPreviewBubble({
             muted
             playsInline
             preload="metadata"
-            src={getMediaSource(message)}
+            src={getMediaSource(message, localMediaUrl)}
             onLoadedMetadata={(event) => {
               setVariant(getPreviewVariant(event.currentTarget.videoWidth, event.currentTarget.videoHeight));
               setLoaded(true);
@@ -322,6 +393,7 @@ function VideoPreviewBubble({
           <span className="bubble__media-play">
             <Play size={18} />
           </span>
+          {isMediaUploading(message) && <MediaTransferOverlay direction="upload" progress={message.uploadProgress ?? 0} />}
         </span>
       </button>
       {mediaCaption && <p className="bubble__media-caption">{highlightText(mediaCaption, query)}</p>}
@@ -329,8 +401,59 @@ function VideoPreviewBubble({
   );
 }
 
-function renderBody(message: Message, query: string, onOpenMedia: (viewer: MediaViewerState) => void) {
+function MediaDownloadPlaceholder({
+  message,
+  query,
+  downloadState,
+  onDownloadMedia,
+}: {
+  message: Message;
+  query: string;
+  downloadState?: MediaDownloadState;
+  onDownloadMedia: (message: Message) => void;
+}) {
   const mediaCaption = getMediaCaption(message);
+  const mediaType = isMediaLikeMessage(message) ? message.messageType as MediaViewerState['type'] : 'document';
+  const fallbackName = mediaType === 'image' ? 'Image' : mediaType === 'video' ? 'Video' : mediaType === 'audio' ? 'Audio' : 'Document';
+  const isDownloading = Boolean(downloadState);
+  const progress = downloadState?.progress ?? 0;
+  const progressLabel = `${Math.round(progress * 100)}%`;
+
+  return (
+    <div className="bubble__media">
+      <button
+        type="button"
+        className={`bubble__download-placeholder bubble__download-placeholder--${mediaType} ${isDownloading ? 'is-downloading' : ''}`}
+        onClick={() => onDownloadMedia(message)}
+        title={isDownloading ? 'Cancel download' : `Download ${fallbackName.toLowerCase()}`}
+      >
+        <span className="bubble__download-blur" />
+        <span
+          className="bubble__download-pill"
+          style={isDownloading ? { '--download-progress': `${progress * 360}deg` } as CSSProperties : undefined}
+        >
+          {isDownloading ? <X size={22} /> : <Download size={18} />}
+          {(isDownloading || formatMediaSize(message.mediaSize)) && (
+            <span>{isDownloading ? progressLabel : formatMediaSize(message.mediaSize)}</span>
+          )}
+        </span>
+      </button>
+      {mediaCaption && <p className="bubble__media-caption">{highlightText(mediaCaption, query)}</p>}
+    </div>
+  );
+}
+
+function renderBody(
+  message: Message,
+  query: string,
+  onOpenMedia: (viewer: MediaViewerState) => void,
+  localMediaUrls: Record<number, string>,
+  downloadStates: Record<number, MediaDownloadState>,
+  onDownloadMedia: (message: Message) => void,
+) {
+  const mediaCaption = getMediaCaption(message);
+  const localMediaUrl = localMediaUrls[message.id] || null;
+  const downloadState = downloadStates[message.id];
 
   if (message.messageType === 'template') {
     return (
@@ -342,14 +465,19 @@ function renderBody(message: Message, query: string, onOpenMedia: (viewer: Media
   }
 
   if (message.messageType === 'document') {
+    if (!isMediaDownloaded(message, localMediaUrl)) {
+      return <MediaDownloadPlaceholder message={message} query={query} downloadState={downloadState} onDownloadMedia={onDownloadMedia} />;
+    }
+
     return (
       <div className="bubble__media">
         <button
           type="button"
           className="bubble__media-button bubble__media-button--document"
           onClick={() => onOpenMedia({
+            messageId: message.id,
             type: 'document',
-            src: getMediaSource(message),
+            src: getMediaSource(message, localMediaUrl),
             caption: mediaCaption,
             fileName: message.fileName || 'Document',
             mimeType: message.mimeType || null,
@@ -364,6 +492,7 @@ function renderBody(message: Message, query: string, onOpenMedia: (viewer: Media
               <span>{message.mimeType || 'Document file'}</span>
             </div>
             <Download size={18} className="bubble__document-action" />
+            {isMediaUploading(message) && <MediaTransferOverlay direction="upload" progress={message.uploadProgress ?? 0} />}
           </div>
         </button>
         {mediaCaption && <p className="bubble__media-caption">{highlightText(mediaCaption, query)}</p>}
@@ -372,22 +501,35 @@ function renderBody(message: Message, query: string, onOpenMedia: (viewer: Media
   }
 
   if (message.messageType === 'image') {
-    return <ImagePreviewBubble message={message} query={query} onOpenMedia={onOpenMedia} />;
+    if (!isMediaDownloaded(message, localMediaUrl)) {
+      return <MediaDownloadPlaceholder message={message} query={query} downloadState={downloadState} onDownloadMedia={onDownloadMedia} />;
+    }
+
+    return <ImagePreviewBubble message={message} query={query} onOpenMedia={onOpenMedia} localMediaUrl={localMediaUrl} />;
   }
 
   if (message.messageType === 'video') {
-    return <VideoPreviewBubble message={message} query={query} onOpenMedia={onOpenMedia} />;
+    if (!isMediaDownloaded(message, localMediaUrl)) {
+      return <MediaDownloadPlaceholder message={message} query={query} downloadState={downloadState} onDownloadMedia={onDownloadMedia} />;
+    }
+
+    return <VideoPreviewBubble message={message} query={query} onOpenMedia={onOpenMedia} localMediaUrl={localMediaUrl} />;
   }
 
   if (message.messageType === 'audio') {
+    if (!isMediaDownloaded(message, localMediaUrl)) {
+      return <MediaDownloadPlaceholder message={message} query={query} downloadState={downloadState} onDownloadMedia={onDownloadMedia} />;
+    }
+
     return (
       <div className="bubble__media">
         <button
           type="button"
           className="bubble__media-button bubble__media-button--audio"
           onClick={() => onOpenMedia({
+            messageId: message.id,
             type: 'audio',
-            src: getMediaSource(message),
+            src: getMediaSource(message, localMediaUrl),
             caption: mediaCaption,
             fileName: message.fileName || 'Audio',
             mimeType: message.mimeType || 'audio/mpeg',
@@ -402,6 +544,7 @@ function renderBody(message: Message, query: string, onOpenMedia: (viewer: Media
               <span>{message.mimeType || 'Audio file'}</span>
             </div>
             <Download size={18} className="bubble__document-action" />
+            {isMediaUploading(message) && <MediaTransferOverlay direction="upload" progress={message.uploadProgress ?? 0} />}
           </div>
         </button>
         {mediaCaption && <p className="bubble__media-caption">{highlightText(mediaCaption, query)}</p>}
@@ -416,7 +559,7 @@ function renderQuotedSnippet(source: Message | null, query: string, senderLabel:
   if (!source) return null;
 
   const previewCopy = highlightText(getMessagePreviewCopy(source), query);
-  const mediaSource = isMediaLikeMessage(source) ? getMediaSource(source) : null;
+  const mediaSource = isMediaLikeMessage(source) && isMediaDownloaded(source) ? getMediaSource(source) : null;
 
   return (
     <button
@@ -485,6 +628,7 @@ export function ChatWindow({
   onDeleteMessage,
   onForwardMessage,
   onSendOptInTemplate,
+  onRenameContact,
   onToggleMute,
   onBack,
 }: Props) {
@@ -495,8 +639,15 @@ export function ChatWindow({
   const [searchQuery, setSearchQuery] = useState('');
   const [activeMatchIndex, setActiveMatchIndex] = useState(0);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [contactEditorOpen, setContactEditorOpen] = useState(false);
+  const [contactNameDraft, setContactNameDraft] = useState('');
+  const [contactNameSaving, setContactNameSaving] = useState(false);
+  const [contactNameError, setContactNameError] = useState('');
   const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
   const [viewer, setViewer] = useState<MediaViewerState | null>(null);
+  const [downloadedMediaUrls, setDownloadedMediaUrls] = useState<Record<number, string>>({});
+  const [mediaDownloadStates, setMediaDownloadStates] = useState<Record<number, MediaDownloadState>>({});
+  const [mediaDownloadError, setMediaDownloadError] = useState('');
   const [reactionTargetWaId, setReactionTargetWaId] = useState<string | null>(null);
   const [reactionLibraryWaId, setReactionLibraryWaId] = useState<string | null>(null);
   const [composerPreviewUrl, setComposerPreviewUrl] = useState<string | null>(null);
@@ -526,6 +677,10 @@ export function ChatWindow({
   const voiceRecorderRef = useRef<MediaRecorder | null>(null);
   const voiceStreamRef = useRef<MediaStream | null>(null);
   const voiceChunksRef = useRef<Blob[]>([]);
+  const downloadedMediaUrlsRef = useRef<Record<number, string>>({});
+  const mediaCacheHydrationKeysRef = useRef<Set<string>>(new Set());
+  const mediaDownloadAbortRefs = useRef<Record<number, AbortController>>({});
+  const activeMessageIdsRef = useRef<Set<number>>(new Set());
   const voiceStartedAtRef = useRef(0);
   const voiceAccumulatedMsRef = useRef(0);
 
@@ -560,11 +715,27 @@ export function ChatWindow({
         : 'Send the intro template first. When the customer replies, normal chat opens for 24 hours.';
 
   const visibleMessages = useMemo(
-    () => messages.filter((message) => message.messageType !== 'reaction'),
+    () => {
+      const nonReactionMessages = messages.filter((message) => message.messageType !== 'reaction');
+      return nonReactionMessages.filter((message, index) => !isDuplicateMediaTimestampMessage(
+        message,
+        index > 0 ? nonReactionMessages[index - 1] : null,
+      ));
+    },
     [messages],
   );
 
   const lastMessageId = messages[messages.length - 1]?.id;
+
+  useEffect(() => {
+    setContactNameDraft(conversation?.contactName || '');
+    setContactNameError('');
+    setContactEditorOpen(false);
+  }, [conversation?.id, conversation?.contactName]);
+
+  useEffect(() => {
+    activeMessageIdsRef.current = new Set(messages.map((message) => message.id));
+  }, [messages]);
 
   const searchMatches = useMemo(() => {
     if (!searchQuery.trim()) return [];
@@ -651,6 +822,85 @@ export function ChatWindow({
       return items;
     });
   }, [visibleMessages]);
+
+  function storeDownloadedMediaUrl(messageId: number, objectUrl: string) {
+    setDownloadedMediaUrls((current) => {
+      if (current[messageId]) {
+        URL.revokeObjectURL(objectUrl);
+        return current;
+      }
+
+      const next = {
+        ...current,
+        [messageId]: objectUrl,
+      };
+      downloadedMediaUrlsRef.current = next;
+      return next;
+    });
+  }
+
+  async function loadCachedMediaObjectUrl(message: Message) {
+    const existingUrl = downloadedMediaUrlsRef.current[message.id];
+    if (existingUrl) return existingUrl;
+
+    const cachedMedia = await getCachedMessageMedia(message);
+    if (!cachedMedia) return null;
+    if (!activeMessageIdsRef.current.has(message.id)) return null;
+
+    const objectUrl = URL.createObjectURL(cachedMedia.blob);
+    const latestUrl = downloadedMediaUrlsRef.current[message.id];
+    if (latestUrl) {
+      URL.revokeObjectURL(objectUrl);
+      return latestUrl;
+    }
+
+    storeDownloadedMediaUrl(message.id, objectUrl);
+    return objectUrl;
+  }
+
+  async function warmMessageMediaCache(message: Message, sourceUrl = getMediaSource(message)) {
+    if (!isMediaLikeMessage(message) || message.id < 0 || downloadedMediaUrlsRef.current[message.id]) return;
+
+    const cachedUrl = await loadCachedMediaObjectUrl(message);
+    if (cachedUrl) {
+      setViewer((current) => (
+        current?.messageId === message.id && current.src !== cachedUrl
+          ? { ...current, src: cachedUrl }
+          : current
+      ));
+      return;
+    }
+
+    try {
+      const response = await fetch(sourceUrl, {
+        credentials: 'include',
+      });
+      if (!response.ok) return;
+
+      const blob = await response.blob();
+      cacheMessageMedia(message, blob, sourceUrl);
+      if (!activeMessageIdsRef.current.has(message.id)) return;
+
+      const objectUrl = URL.createObjectURL(blob);
+      storeDownloadedMediaUrl(message.id, objectUrl);
+      setViewer((current) => (
+        current?.messageId === message.id
+          ? { ...current, src: objectUrl }
+          : current
+      ));
+    } catch {
+      // Warming the browser cache is opportunistic; visible media can keep using the live URL.
+    }
+  }
+
+  function handleOpenMedia(nextViewer: MediaViewerState) {
+    setViewer(nextViewer);
+
+    const sourceMessage = messages.find((message) => message.id === nextViewer.messageId);
+    if (sourceMessage && !downloadedMediaUrlsRef.current[sourceMessage.id]) {
+      void warmMessageMediaCache(sourceMessage, nextViewer.src);
+    }
+  }
 
   function getSenderLabel(message: Message) {
     if (message.direction === 'outbound') return 'You';
@@ -786,16 +1036,150 @@ export function ChatWindow({
   }, [file]);
 
   useEffect(() => {
+    let cancelled = false;
+    const mediaMessages = messages
+      .filter((message) => isMediaLikeMessage(message) && message.id > 0 && !downloadedMediaUrlsRef.current[message.id])
+      .slice(-80);
+
+    for (const message of mediaMessages) {
+      const hydrationKey = getMediaCacheHydrationKey(message);
+      if (mediaCacheHydrationKeysRef.current.has(hydrationKey)) continue;
+
+      mediaCacheHydrationKeysRef.current.add(hydrationKey);
+      void getCachedMessageMedia(message)
+        .then((cachedMedia) => {
+          if (cancelled || !cachedMedia || downloadedMediaUrlsRef.current[message.id]) return;
+
+          const objectUrl = URL.createObjectURL(cachedMedia.blob);
+          storeDownloadedMediaUrl(message.id, objectUrl);
+        })
+        .catch(() => undefined);
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [conversation?.id, messages]);
+
+  useEffect(() => {
     resizeComposerTextarea(textareaRef.current);
   }, [draft, file, replyTarget, isNormalChatLocked]);
 
+  useEffect(() => () => {
+    Object.values(downloadedMediaUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
+    Object.values(mediaDownloadAbortRefs.current).forEach((controller) => controller.abort());
+  }, []);
+
   useEffect(() => {
+    if (!mediaDownloadError) return undefined;
+
+    const timeout = setTimeout(() => setMediaDownloadError(''), 4200);
+    return () => clearTimeout(timeout);
+  }, [mediaDownloadError]);
+
+  useEffect(() => {
+    Object.values(downloadedMediaUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
+    Object.values(mediaDownloadAbortRefs.current).forEach((controller) => controller.abort());
+    downloadedMediaUrlsRef.current = {};
+    mediaDownloadAbortRefs.current = {};
+    mediaCacheHydrationKeysRef.current.clear();
+    setDownloadedMediaUrls({});
+    setMediaDownloadStates({});
+    setMediaDownloadError('');
+    setViewer(null);
     setReplyTarget(null);
     setReactionTargetWaId(null);
     setReactionLibraryWaId(null);
     setActionMessage(null);
     setDeleteConfirmMessage(null);
   }, [conversation?.id]);
+
+  async function handleMediaDownloadRequest(message: Message) {
+    const existingAbort = mediaDownloadAbortRefs.current[message.id];
+    if (existingAbort) {
+      existingAbort.abort();
+      delete mediaDownloadAbortRefs.current[message.id];
+      setMediaDownloadStates((current) => {
+        const next = { ...current };
+        delete next[message.id];
+        return next;
+      });
+      return;
+    }
+
+    const cachedUrl = await loadCachedMediaObjectUrl(message);
+    if (cachedUrl) return;
+
+    const controller = new AbortController();
+    mediaDownloadAbortRefs.current[message.id] = controller;
+    setMediaDownloadError('');
+    setMediaDownloadStates((current) => ({
+      ...current,
+      [message.id]: { progress: null },
+    }));
+
+    try {
+      const response = await fetch(getMediaSource(message), {
+        credentials: 'include',
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => '');
+        throw new Error(errorText || `Download failed with status ${response.status}`);
+      }
+
+      const total = Number(response.headers.get('content-length') || message.mediaSize || 0);
+      let blob: Blob;
+
+      if (response.body && typeof response.body.getReader === 'function') {
+        const reader = response.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let received = 0;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!value) continue;
+
+          chunks.push(value);
+          received += value.byteLength;
+
+          if (total > 0) {
+            setMediaDownloadStates((current) => ({
+              ...current,
+              [message.id]: { progress: Math.min(received / total, 1) },
+            }));
+          }
+        }
+
+        blob = new Blob(chunks, { type: response.headers.get('content-type') || message.mimeType || 'application/octet-stream' });
+      } else {
+        blob = await response.blob();
+      }
+
+      cacheMessageMedia(message, blob, getMediaSource(message));
+      const objectUrl = URL.createObjectURL(blob);
+      setMediaDownloadStates((current) => ({
+        ...current,
+        [message.id]: { progress: 1 },
+      }));
+      storeDownloadedMediaUrl(message.id, objectUrl);
+    } catch (error) {
+      if ((error as { name?: string })?.name !== 'AbortError') {
+        setMediaDownloadError(error instanceof Error ? error.message : 'Download failed.');
+      }
+    } finally {
+      delete mediaDownloadAbortRefs.current[message.id];
+      window.setTimeout(() => {
+        setMediaDownloadStates((current) => {
+          const next = { ...current };
+          delete next[message.id];
+          return next;
+        });
+      }, 160);
+    }
+  }
 
   function handleDownloadMedia() {
     if (!viewer) return;
@@ -865,6 +1249,29 @@ export function ChatWindow({
     setMenuOpen(false);
   }
 
+  function openContactEditor() {
+    setContactNameDraft(conversation?.contactName || '');
+    setContactNameError('');
+    setContactEditorOpen(true);
+    setMenuOpen(false);
+  }
+
+  async function handleSaveContactName() {
+    const normalizedName = contactNameDraft.replace(/\s+/g, ' ').trim();
+    if (!normalizedName || contactNameSaving) return;
+
+    setContactNameSaving(true);
+    setContactNameError('');
+    try {
+      await onRenameContact(normalizedName);
+      setContactEditorOpen(false);
+    } catch (error) {
+      setContactNameError(error instanceof Error ? error.message : 'Could not update contact name');
+    } finally {
+      setContactNameSaving(false);
+    }
+  }
+
   function handleEmojiClick(emojiData: EmojiClickData) {
     setDraft((current) => `${current}${emojiData.emoji}`);
     textareaRef.current?.focus();
@@ -885,6 +1292,10 @@ export function ChatWindow({
 
   function handleReactionEmojiClick(message: Message, emojiData: EmojiClickData) {
     void handleReactionClick(message, emojiData.emoji);
+  }
+
+  function stopReactionPickerEvent(event: SyntheticEvent) {
+    event.stopPropagation();
   }
 
   function clearMessageLongPressTimer() {
@@ -1059,7 +1470,7 @@ export function ChatWindow({
 
   function handleMessagesScroll() {
     if (!messagesViewportRef.current) return;
-    if (messagesViewportRef.current.scrollTop <= 120) {
+    if (messagesViewportRef.current.scrollTop <= OLDER_MESSAGES_AUTOLOAD_OFFSET_PX) {
       requestOlderMessages();
     }
   }
@@ -1092,6 +1503,13 @@ export function ChatWindow({
 
   return (
     <section className="chat-pane">
+      {mediaDownloadError && (
+        <div className="chat-toast chat-toast--error" role="alert">
+          <strong>Download failed</strong>
+          <span>{mediaDownloadError}</span>
+        </div>
+      )}
+
       <header className="chat-pane__header">
         <button type="button" className="mobile-back-button" onClick={onBack} title="Back to chats">
           <ArrowLeft size={22} />
@@ -1129,6 +1547,10 @@ export function ChatWindow({
 
             {menuOpen && (
               <div className="chat-pane__menu">
+                <button type="button" onClick={openContactEditor}>
+                  <Pencil size={16} />
+                  <span>Edit contact name</span>
+                </button>
                 <button type="button" onClick={() => { onToggleMute(); setMenuOpen(false); }}>
                   {muted ? <Bell size={16} /> : <BellOff size={16} />}
                   <span>{muted ? 'Unmute conversation' : 'Mute conversation'}</span>
@@ -1205,9 +1627,12 @@ export function ChatWindow({
 
       <div ref={messagesViewportRef} className="chat-pane__messages" onScroll={handleMessagesScroll}>
         {hasOlderMessages && (
-          <button type="button" className="chat-pane__older" onClick={requestOlderMessages}>
-            Load older messages
-          </button>
+          <div className="chat-pane__older-sentinel" aria-hidden="true" />
+        )}
+        {loading && visibleMessages.length > 0 && (
+          <div className="chat-pane__older-status" aria-label="Loading older messages">
+            <span />
+          </div>
         )}
 
         {loading && visibleMessages.length === 0 && <MessageSkeleton />}
@@ -1226,7 +1651,7 @@ export function ChatWindow({
               className={`message-row message-row--${item.message.direction} ${jumpHighlightId === item.message.id ? 'message-row--jump-active' : ''}`}
             >
               <div
-                className={`bubble ${item.message.direction === 'outbound' ? 'bubble--outbound' : 'bubble--inbound'} ${isMediaLikeMessage(item.message) ? 'bubble--media-message' : ''} ${item.message.waMessageId && reactionMap.get(item.message.waMessageId)?.length ? 'bubble--has-reactions' : ''} ${searchMatches[activeMatchIndex] === item.message.id ? 'bubble--search-active' : ''}`}
+                className={`bubble ${item.message.direction === 'outbound' ? 'bubble--outbound' : 'bubble--inbound'} ${isMediaLikeMessage(item.message) ? 'bubble--media-message' : ''} ${['image', 'video'].includes(item.message.messageType) ? 'bubble--visual-media' : ''} ${isMediaLikeMessage(item.message) && getMediaCaption(item.message) ? 'bubble--has-media-caption' : ''} ${item.message.waMessageId && reactionMap.get(item.message.waMessageId)?.length ? 'bubble--has-reactions' : ''} ${searchMatches[activeMatchIndex] === item.message.id ? 'bubble--search-active' : ''}`}
                 onPointerDown={(event) => {
                   if ((event.target as HTMLElement).closest('button, a, input, textarea')) return;
                   handleMessagePressStart(item.message);
@@ -1295,14 +1720,22 @@ export function ChatWindow({
                   </div>
                 )}
                 {reactionTargetWaId === item.message.waMessageId && (
-                  <div className={`bubble__reaction-picker ${reactionLibraryWaId === item.message.waMessageId ? 'is-expanded' : ''}`}>
+                  <div
+                    className={`bubble__reaction-picker ${reactionLibraryWaId === item.message.waMessageId ? 'is-expanded' : ''}`}
+                    onPointerDown={stopReactionPickerEvent}
+                    onMouseDown={stopReactionPickerEvent}
+                    onClick={stopReactionPickerEvent}
+                  >
                     <div className="bubble__reaction-row">
                       {REACTION_SHORTCUTS.map((emoji) => (
                         <button
                           key={emoji}
                           type="button"
                           className="bubble__reaction-option"
-                          onClick={() => void handleReactionClick(item.message, emoji)}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void handleReactionClick(item.message, emoji);
+                          }}
                         >
                           {emoji}
                         </button>
@@ -1311,15 +1744,23 @@ export function ChatWindow({
                         type="button"
                         className="bubble__reaction-option bubble__reaction-option--icon"
                         title="More reactions"
-                        onClick={() => setReactionLibraryWaId((current) => (
-                          current === item.message.waMessageId ? null : item.message.waMessageId
-                        ))}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setReactionLibraryWaId((current) => (
+                            current === item.message.waMessageId ? null : item.message.waMessageId
+                          ));
+                        }}
                       >
                         <Plus size={17} />
                       </button>
                     </div>
                     {reactionLibraryWaId === item.message.waMessageId && (
-                      <div className="bubble__reaction-library">
+                      <div
+                        className="bubble__reaction-library"
+                        onPointerDown={stopReactionPickerEvent}
+                        onMouseDown={stopReactionPickerEvent}
+                        onClick={stopReactionPickerEvent}
+                      >
                         <Suspense fallback={<div className="emoji-picker-loading"><span className="skeleton-line skeleton-line--wide" /></div>}>
                           <EmojiPicker
                             open
@@ -1338,7 +1779,7 @@ export function ChatWindow({
                     )}
                   </div>
                 )}
-                <div className="bubble__content">{renderBody(item.message, searchQuery, setViewer)}</div>
+                <div className="bubble__content">{renderBody(item.message, searchQuery, handleOpenMedia, downloadedMediaUrls, mediaDownloadStates, handleMediaDownloadRequest)}</div>
                 {item.message.waMessageId && reactionMap.get(item.message.waMessageId)?.length ? (
                   <div className="bubble__reactions">
                     {reactionMap.get(item.message.waMessageId)!.map((reaction) => (
@@ -1605,6 +2046,52 @@ export function ChatWindow({
               </button>
             </div>
           )}
+        </section>
+      </div>
+
+      <div className={`bottom-sheet ${contactEditorOpen ? 'is-open' : ''}`} aria-hidden={!contactEditorOpen}>
+        <div className="bottom-sheet__backdrop" onClick={() => setContactEditorOpen(false)} />
+        <section className="bottom-sheet__panel bottom-sheet__panel--compact frosted-panel" role="dialog" aria-modal="true">
+          <header className="bottom-sheet__header">
+            <div>
+              <span className="bottom-sheet__eyebrow">Contact</span>
+              <h2>Edit contact name</h2>
+            </div>
+            <button type="button" className="toolbar-icon-button" onClick={() => setContactEditorOpen(false)} title="Close">
+              <X size={18} />
+            </button>
+          </header>
+          <div className="bottom-sheet__body name-editor-body">
+            <label>
+              <span>Name</span>
+              <input
+                value={contactNameDraft}
+                onChange={(event) => setContactNameDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    void handleSaveContactName();
+                  }
+                }}
+                autoFocus
+                maxLength={160}
+              />
+            </label>
+            {contactNameError && <div className="inline-error">{contactNameError}</div>}
+          </div>
+          <footer className="bottom-sheet__footer">
+            <button type="button" className="ghost-button" onClick={() => setContactEditorOpen(false)}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              disabled={!contactNameDraft.trim() || contactNameSaving}
+              onClick={() => void handleSaveContactName()}
+            >
+              {contactNameSaving ? 'Saving...' : 'Save'}
+            </button>
+          </footer>
         </section>
       </div>
 

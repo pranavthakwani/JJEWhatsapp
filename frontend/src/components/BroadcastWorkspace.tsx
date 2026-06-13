@@ -1,14 +1,20 @@
 import {
   AlertCircle,
   ArrowLeft,
+  Bell,
+  BellOff,
   Check,
   CheckCheck,
+  ChevronDown,
+  ChevronUp,
   Clock3,
   FileText,
   Info,
   Megaphone,
   Mic,
+  MoreVertical,
   Paperclip,
+  Pencil,
   Play,
   Search,
   SendHorizonal,
@@ -27,6 +33,7 @@ import {
   getContactList,
   getContactListCampaigns,
   listContacts,
+  renameContactList,
   replaceContactListMembers,
 } from '../lib/api';
 import { socket } from '../lib/socket';
@@ -72,9 +79,9 @@ const CONTACT_FETCH_LIMIT = 50000;
 const OPT_IN_WAITING_STATUSES = new Set(['optin_initial_sent', 'optin_followup_sent']);
 const VOICE_RECORDER_MIME_TYPES = [
   'audio/ogg;codecs=opus',
-  'audio/mp4',
   'audio/webm;codecs=opus',
   'audio/webm',
+  'audio/mp4',
 ];
 
 function shouldSubmitOnEnter() {
@@ -174,6 +181,15 @@ function getAttachmentLabel(mode: Campaign['mode'], mimeType?: string | null) {
   return 'Message';
 }
 
+function getBroadcastSearchText(item: Campaign | OptimisticBroadcast) {
+  return [
+    item.bodyText,
+    item.fileName,
+    item.mimeType,
+    'templateName' in item ? item.templateName : null,
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+
 function getRecipientCount(contactList: ContactList) {
   return contactList.memberCount ?? contactList.members?.length ?? 0;
 }
@@ -183,7 +199,7 @@ function hasCompleteMemberDetails(contactList: ContactList) {
 }
 
 function getContactName(contact: Contact) {
-  return contact.profileName || contact.businessDirectoryName || contact.phoneNumber || contact.waId;
+  return contact.businessDirectoryName || contact.profileName || contact.phoneNumber || contact.waId;
 }
 
 function getRecipientName(recipient: CampaignRecipient) {
@@ -420,6 +436,14 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
   const [loadingMemberDetail, setLoadingMemberDetail] = useState(false);
   const [loadingContacts, setLoadingContacts] = useState(false);
   const [savingMembers, setSavingMembers] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [listNameDraft, setListNameDraft] = useState('');
+  const [savingName, setSavingName] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [activeSearchIndex, setActiveSearchIndex] = useState(0);
+  const [muted, setMuted] = useState(false);
   const [voiceMode, setVoiceMode] = useState<'idle' | 'recording' | 'review'>('idle');
   const [voiceDurationMs, setVoiceDurationMs] = useState(0);
   const [voiceChunkCount, setVoiceChunkCount] = useState(0);
@@ -429,6 +453,9 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const emojiRef = useRef<HTMLDivElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const broadcastItemRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const voiceHoldTimerRef = useRef<number | null>(null);
   const voiceTimerRef = useRef<number | null>(null);
   const voiceRecorderRef = useRef<MediaRecorder | null>(null);
@@ -488,6 +515,16 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
     });
   }, [campaigns, optimisticItems]);
 
+  const searchMatches = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return [];
+
+    return timeline
+      .filter((item): item is Exclude<BroadcastTimelineItem, { type: 'date' }> => item.type !== 'date')
+      .filter((item) => getBroadcastSearchText(item.type === 'campaign' ? item.campaign : item.item).includes(query))
+      .map((item) => item.key);
+  }, [searchQuery, timeline]);
+
   const visibleContacts = useMemo(() => {
     const query = memberSearch.trim().toLowerCase();
     if (!query) return allContacts;
@@ -536,14 +573,39 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
-      if (!emojiRef.current?.contains(event.target as Node)) {
+      const target = event.target as Node;
+      if (!emojiRef.current?.contains(target)) {
         setEmojiPickerOpen(false);
+      }
+      if (menuRef.current && !menuRef.current.contains(target)) {
+        setMenuOpen(false);
       }
     }
 
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  useEffect(() => {
+    if (!searchOpen) return;
+    searchInputRef.current?.focus();
+  }, [searchOpen]);
+
+  useEffect(() => {
+    if (searchMatches.length === 0) {
+      setActiveSearchIndex(0);
+      return;
+    }
+    if (activeSearchIndex >= searchMatches.length) {
+      setActiveSearchIndex(0);
+    }
+  }, [activeSearchIndex, searchMatches.length]);
+
+  useEffect(() => {
+    const activeKey = searchMatches[activeSearchIndex];
+    if (!activeKey) return;
+    broadcastItemRefs.current[activeKey]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [activeSearchIndex, searchMatches]);
 
   useEffect(() => () => {
     if (voiceHoldTimerRef.current) {
@@ -564,11 +626,27 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
     setInfoError('');
     setInfoCampaign(null);
     setMembersOpen(false);
+    setEditingName(false);
+    setMenuOpen(false);
+    setSearchOpen(false);
+    setSearchQuery('');
+    setActiveSearchIndex(0);
+    setListNameDraft(contactList?.name || '');
     setOptimisticItems([]);
     setCampaigns([]);
     clearVoiceRecording();
 
-    if (!contactList) return;
+    if (!contactList) {
+      setMuted(false);
+      return;
+    }
+
+    try {
+      const saved = JSON.parse(window.localStorage.getItem('jjewa-muted-broadcasts') || '[]');
+      setMuted(Array.isArray(saved) && saved.includes(contactList.id));
+    } catch {
+      setMuted(false);
+    }
 
     let cancelled = false;
     const cachedCampaigns = getCachedContactListCampaigns(contactList.id);
@@ -594,6 +672,12 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
       cancelled = true;
     };
   }, [contactList?.clearedAt, contactList?.id]);
+
+  useEffect(() => {
+    if (!editingName) {
+      setListNameDraft(contactList?.name || '');
+    }
+  }, [contactList?.name, editingName]);
 
   useEffect(() => {
     if (!contactList) return;
@@ -901,6 +985,78 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
     }
   }
 
+  async function handleSaveListName() {
+    if (!contactList) return;
+
+    const name = listNameDraft.replace(/\s+/g, ' ').trim();
+    if (!name || name === contactList.name) {
+      setEditingName(false);
+      setListNameDraft(contactList.name);
+      return;
+    }
+
+    setSavingName(true);
+    setError('');
+    try {
+      const updatedList = await renameContactList(contactList.id, name);
+      onContactListUpdated(updatedList);
+      setEditingName(false);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : 'Failed to rename broadcast list');
+    } finally {
+      setSavingName(false);
+    }
+  }
+
+  function handleToggleSearch() {
+    setSearchOpen((current) => {
+      const next = !current;
+      if (!next) {
+        setSearchQuery('');
+        setActiveSearchIndex(0);
+      }
+      return next;
+    });
+    setMenuOpen(false);
+  }
+
+  function handleJumpToLatest() {
+    messagesRef.current?.scrollTo({
+      top: messagesRef.current.scrollHeight,
+      behavior: 'smooth',
+    });
+    setMenuOpen(false);
+  }
+
+  function handleToggleMute() {
+    if (!contactList) return;
+
+    setMuted((current) => {
+      const next = !current;
+      let mutedIds: number[] = [];
+      try {
+        const saved = JSON.parse(window.localStorage.getItem('jjewa-muted-broadcasts') || '[]');
+        mutedIds = Array.isArray(saved) ? saved.filter((value) => Number.isInteger(value)) : [];
+      } catch {
+        mutedIds = [];
+      }
+
+      const updatedIds = next
+        ? [...new Set([...mutedIds, contactList.id])]
+        : mutedIds.filter((listId) => listId !== contactList.id);
+      window.localStorage.setItem('jjewa-muted-broadcasts', JSON.stringify(updatedIds));
+      return next;
+    });
+    setMenuOpen(false);
+  }
+
+  function openBroadcastEditor() {
+    setListNameDraft(contactList?.name || '');
+    setEditingName(true);
+    setMembersOpen(true);
+    setMenuOpen(false);
+  }
+
   if (!contactList) {
     return (
       <section className="chat-pane chat-pane--empty">
@@ -936,11 +1092,91 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
                 <div className="chat-pane__subtitle">
                   {recipientCount} recipients
                 </div>
+                {muted && (
+                  <span className="chat-pane__mute-indicator" title="Muted">
+                    <BellOff size={14} />
+                  </span>
+                )}
               </div>
             </div>
           </button>
         </div>
+        <div className="chat-pane__header-actions">
+          <button type="button" className="toolbar-icon-button" title="Search in broadcast" onClick={handleToggleSearch}>
+            <Search size={18} />
+          </button>
+          <div ref={menuRef} className="chat-pane__menu-anchor">
+            <button
+              type="button"
+              className="toolbar-icon-button"
+              title="More options"
+              onClick={() => setMenuOpen((current) => !current)}
+            >
+              <MoreVertical size={18} />
+            </button>
+            {menuOpen && (
+              <div className="chat-pane__menu">
+                <button type="button" onClick={openBroadcastEditor}>
+                  <Pencil size={16} />
+                  <span>Edit broadcast</span>
+                </button>
+                <button type="button" onClick={() => { setMembersOpen(true); setMenuOpen(false); }}>
+                  <Users size={16} />
+                  <span>Broadcast participants</span>
+                </button>
+                <button type="button" onClick={handleToggleMute}>
+                  {muted ? <Bell size={16} /> : <BellOff size={16} />}
+                  <span>{muted ? 'Unmute broadcast' : 'Mute broadcast'}</span>
+                </button>
+                <button type="button" onClick={handleToggleSearch}>
+                  <Search size={16} />
+                  <span>Search in broadcast</span>
+                </button>
+                <button type="button" onClick={handleJumpToLatest}>
+                  <ChevronDown size={16} />
+                  <span>Jump to latest</span>
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
       </header>
+
+      {searchOpen && (
+        <div className="chat-pane__searchbar">
+          <Search size={16} />
+          <input
+            ref={searchInputRef}
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="Search in broadcast"
+          />
+          <span className="chat-pane__searchbar-count">
+            {searchMatches.length === 0 ? '0' : `${activeSearchIndex + 1}/${searchMatches.length}`}
+          </span>
+          <button
+            type="button"
+            className="toolbar-icon-button"
+            onClick={() => setActiveSearchIndex((current) => (current <= 0 ? searchMatches.length - 1 : current - 1))}
+            disabled={searchMatches.length === 0}
+            title="Previous result"
+          >
+            <ChevronUp size={16} />
+          </button>
+          <button
+            type="button"
+            className="toolbar-icon-button"
+            onClick={() => setActiveSearchIndex((current) => (current + 1) % searchMatches.length)}
+            disabled={searchMatches.length === 0}
+            title="Next result"
+          >
+            <ChevronDown size={16} />
+          </button>
+          <button type="button" className="toolbar-icon-button" onClick={handleToggleSearch} title="Close search">
+            <X size={16} />
+          </button>
+        </div>
+      )}
 
       <div ref={messagesRef} className="chat-pane__messages broadcast-chat-pane__messages">
         {loading && timeline.length === 0 && <BroadcastHistorySkeleton />}
@@ -963,7 +1199,11 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
 
           if (item.type === 'campaign') {
             return (
-              <div key={item.key} className="message-row message-row--outbound">
+              <div
+                key={item.key}
+                ref={(node) => { broadcastItemRefs.current[item.key] = node; }}
+                className={`message-row message-row--outbound ${searchMatches[activeSearchIndex] === item.key ? 'message-row--search-active' : ''}`}
+              >
                 <div className="bubble bubble--outbound broadcast-bubble">
                   <div className="bubble__content">
                     {renderBroadcastPayload({
@@ -993,7 +1233,11 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
           }
 
           return (
-            <div key={item.key} className="message-row message-row--outbound">
+            <div
+              key={item.key}
+              ref={(node) => { broadcastItemRefs.current[item.key] = node; }}
+              className={`message-row message-row--outbound ${searchMatches[activeSearchIndex] === item.key ? 'message-row--search-active' : ''}`}
+            >
               <div className={`bubble bubble--outbound broadcast-bubble ${item.item.status === 'failed' ? 'broadcast-bubble--failed' : ''}`}>
                 <div className="bubble__content">
                   {renderBroadcastPayload({
@@ -1269,7 +1513,33 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
           <header className="bottom-sheet__header">
             <div>
               <span className="bottom-sheet__eyebrow">Broadcast list</span>
-              <h2>{contactList.name}</h2>
+              {editingName ? (
+                <div className="broadcast-name-editor">
+                  <input
+                    value={listNameDraft}
+                    onChange={(event) => setListNameDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') void handleSaveListName();
+                      if (event.key === 'Escape') {
+                        setEditingName(false);
+                        setListNameDraft(contactList.name);
+                      }
+                    }}
+                    maxLength={120}
+                    autoFocus
+                  />
+                  <button type="button" onClick={() => void handleSaveListName()} disabled={savingName}>
+                    {savingName ? 'Saving...' : 'Save'}
+                  </button>
+                </div>
+              ) : (
+                <div className="broadcast-name-heading">
+                  <h2>{contactList.name}</h2>
+                  <button type="button" onClick={() => setEditingName(true)} title="Rename broadcast list">
+                    <Pencil size={15} />
+                  </button>
+                </div>
+              )}
               <p>{hasMemberDetails ? `${optedInMembers.length} opted in, ${notOptedInMembers.length} not opted in` : 'Loading participants'}</p>
             </div>
             <button type="button" className="toolbar-icon-button" onClick={() => setMembersOpen(false)} title="Close">

@@ -64,7 +64,7 @@ function dedupeRecipients(items: RecipientDraft[]) {
 }
 
 function getContactName(contact: Contact) {
-  return contact.profileName || contact.businessDirectoryName || contact.phoneNumber || contact.waId;
+  return contact.businessDirectoryName || contact.profileName || contact.phoneNumber || contact.waId;
 }
 
 function isAlphabeticContact(contact: Contact) {
@@ -101,7 +101,7 @@ function buildContactRecipient(contact: Contact): RecipientDraft {
   return {
     key: `contact:${contact.id}`,
     waId: contact.waId,
-    name: contact.profileName || contact.businessDirectoryName || null,
+    name: contact.businessDirectoryName || contact.profileName || null,
     phoneNumber: contact.phoneNumber,
     contactId: contact.id,
     businessDirectoryName: contact.businessDirectoryName,

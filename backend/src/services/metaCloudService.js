@@ -45,6 +45,21 @@ function isWebmAudio(mimeType, fileName) {
   return normalizedMime.includes('audio/webm') || normalizedName.endsWith('.webm');
 }
 
+function isAppRecordedVoiceNote(mimeType, fileName) {
+  const normalizedMime = String(mimeType || '').toLowerCase();
+  const normalizedName = String(fileName || '').toLowerCase();
+  return normalizedMime.startsWith('audio/') && (
+    normalizedName.startsWith('voice-note-') ||
+    normalizedName.startsWith('broadcast-voice-note-')
+  );
+}
+
+function isOggOpusAudio(mimeType, fileName) {
+  const normalizedMime = String(mimeType || '').toLowerCase();
+  const normalizedName = String(fileName || '').toLowerCase();
+  return normalizedMime.includes('audio/ogg') || normalizedMime.includes('audio/opus') || normalizedName.endsWith('.ogg');
+}
+
 function normalizeMediaMimeType(mimeType) {
   const normalizedMime = String(mimeType || '').toLowerCase();
   if (normalizedMime.includes('audio/ogg')) return 'audio/ogg';
@@ -78,9 +93,19 @@ function runFfmpeg(args) {
   });
 }
 
-async function convertWebmAudioToOgg(buffer) {
+function audioInputExtension(mimeType, fileName) {
+  const normalizedMime = String(mimeType || '').toLowerCase();
+  const normalizedName = String(fileName || '').toLowerCase();
+  if (normalizedMime.includes('webm') || normalizedName.endsWith('.webm')) return 'webm';
+  if (normalizedMime.includes('mp4') || normalizedName.endsWith('.m4a') || normalizedName.endsWith('.mp4')) return 'm4a';
+  if (normalizedMime.includes('mpeg') || normalizedName.endsWith('.mp3')) return 'mp3';
+  if (normalizedMime.includes('ogg') || normalizedName.endsWith('.ogg')) return 'ogg';
+  return 'audio';
+}
+
+async function convertAudioToOgg(buffer, inputExtension = 'audio') {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'jjewa-audio-'));
-  const inputPath = path.join(tempDir, `${randomUUID()}.webm`);
+  const inputPath = path.join(tempDir, `${randomUUID()}.${inputExtension}`);
   const outputPath = path.join(tempDir, `${randomUUID()}.ogg`);
 
   try {
@@ -122,6 +147,7 @@ export async function sendTextMessage({ number, to, body, replyToWaMessageId }) 
       },
       {
         headers: buildHeaders(number),
+        proxy: false,
         timeout: 30000,
       },
     );
@@ -146,6 +172,7 @@ export async function markMessageAsRead({ number, messageId }) {
       },
       {
         headers: buildHeaders(number),
+        proxy: false,
         timeout: 30000,
       },
     );
@@ -175,6 +202,7 @@ export async function sendTemplateMessage({ number, to, templateName, languageCo
       },
       {
         headers: buildHeaders(number),
+        proxy: false,
         timeout: 30000,
       },
     );
@@ -193,10 +221,10 @@ export async function uploadMedia({ number, buffer, mimeType, fileName }) {
   let uploadMimeType = mimeType;
   let uploadFileName = fileName;
 
-  if (isWebmAudio(mimeType, fileName)) {
-    uploadBuffer = await convertWebmAudioToOgg(Buffer.from(buffer));
+  if (isWebmAudio(mimeType, fileName) || (isAppRecordedVoiceNote(mimeType, fileName) && !isOggOpusAudio(mimeType, fileName))) {
+    uploadBuffer = await convertAudioToOgg(Buffer.from(buffer), audioInputExtension(mimeType, fileName));
     uploadMimeType = 'audio/ogg';
-    uploadFileName = String(fileName || 'voice-note.webm').replace(/\.webm$/i, '.ogg');
+    uploadFileName = String(fileName || 'voice-note.audio').replace(/\.[^.]+$/i, '.ogg');
   } else {
     uploadMimeType = normalizeMediaMimeType(uploadMimeType);
   }
@@ -249,6 +277,7 @@ export async function sendMediaMessage({ number, to, mediaType, mediaId, caption
       },
       {
         headers: buildHeaders(number),
+        proxy: false,
         timeout: 30000,
       },
     );
@@ -278,6 +307,7 @@ export async function sendReactionMessage({ number, to, emoji, replyToWaMessageI
       },
       {
         headers: buildHeaders(number),
+        proxy: false,
         timeout: 30000,
       },
     );
@@ -297,6 +327,7 @@ export async function listMessageTemplates(number) {
       `${buildBaseUrl(number)}/${number.wabaId}/message_templates`,
       {
         headers: buildHeaders(number),
+        proxy: false,
         timeout: 30000,
       },
     );
@@ -322,6 +353,7 @@ export async function getBusinessProfile(number) {
           fields: 'profile_picture_url',
         },
         headers: buildHeaders(number),
+        proxy: false,
         timeout: 7000,
       },
     );
@@ -350,6 +382,7 @@ export async function downloadMediaContent({ number, mediaId }) {
       `${buildBaseUrl(number)}/${mediaId}`,
       {
         headers: buildHeaders(number),
+        proxy: false,
         timeout: 30000,
       },
     );
@@ -366,6 +399,7 @@ export async function downloadMediaContent({ number, mediaId }) {
       headers: {
         Authorization: `Bearer ${number.accessToken}`,
       },
+      proxy: false,
       responseType: 'arraybuffer',
       timeout: 60000,
     });
@@ -377,4 +411,42 @@ export async function downloadMediaContent({ number, mediaId }) {
     buffer: binaryResponse.data,
     mimeType,
   };
+}
+
+export async function getMediaDownloadStream({ number, mediaId }) {
+  let metadataResponse;
+  try {
+    metadataResponse = await axios.get(
+      `${buildBaseUrl(number)}/${mediaId}`,
+      {
+        headers: buildHeaders(number),
+        proxy: false,
+        timeout: 30000,
+      },
+    );
+  } catch (error) {
+    throw wrapMetaError(error, 'Meta media metadata fetch failed');
+  }
+
+  const mediaUrl = metadataResponse.data.url;
+  const mimeType = metadataResponse.data.mime_type || 'application/octet-stream';
+
+  try {
+    const response = await axios.get(mediaUrl, {
+      headers: {
+        Authorization: `Bearer ${number.accessToken}`,
+      },
+      proxy: false,
+      responseType: 'stream',
+      timeout: 60000,
+    });
+
+    return {
+      stream: response.data,
+      mimeType,
+      contentLength: Number(response.headers['content-length'] || 0) || null,
+    };
+  } catch (error) {
+    throw wrapMetaError(error, 'Meta media download failed');
+  }
 }

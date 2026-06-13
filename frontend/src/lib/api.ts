@@ -1,4 +1,13 @@
 import axios from 'axios';
+import {
+  deleteCachedConversationMedia,
+  deleteCachedMessageMedia,
+  deleteCachedMessageSnapshot,
+  readCachedMessageMedia,
+  readCachedMessageSnapshot,
+  writeCachedMessageMedia,
+  writeCachedMessageSnapshot,
+} from './browserCache';
 import type {
   AuthDevice,
   AuthStatus,
@@ -105,12 +114,54 @@ export function cacheConversations(params: { phoneNumberId?: number | null; sear
   writeCache(makeCacheKey(makeConversationCacheName(params)), data);
 }
 
-export function getCachedMessages(conversationId: number) {
-  return readCache<PaginatedResult<Message>>(makeCacheKey(`messages:${conversationId}:first:30`), MESSAGE_CACHE_TTL_MS);
+function makeMessageCacheKey(conversationId: number) {
+  return makeCacheKey(`messages:${conversationId}:first:30`);
+}
+
+function compactLocalMessagePage(data: PaginatedResult<Message>) {
+  return {
+    items: data.items.filter((message) => message.id > 0 && !message.deletedAt).slice(-30),
+    nextCursor: data.nextCursor,
+  } satisfies PaginatedResult<Message>;
+}
+
+export async function getCachedMessages(conversationId: number) {
+  const indexedDbSnapshot = await readCachedMessageSnapshot(apiBaseUrl, conversationId);
+  if (indexedDbSnapshot) return indexedDbSnapshot;
+
+  return readCache<PaginatedResult<Message>>(makeMessageCacheKey(conversationId), MESSAGE_CACHE_TTL_MS);
 }
 
 export function cacheMessages(conversationId: number, data: PaginatedResult<Message>) {
-  writeCache(makeCacheKey(`messages:${conversationId}:first:30`), data);
+  writeCache(makeMessageCacheKey(conversationId), compactLocalMessagePage(data));
+  void writeCachedMessageSnapshot(apiBaseUrl, conversationId, data);
+}
+
+export function cacheMessageSnapshot(conversationId: number, items: Message[], nextCursor: string | null) {
+  const data = { items, nextCursor } satisfies PaginatedResult<Message>;
+  writeCache(makeMessageCacheKey(conversationId), compactLocalMessagePage(data));
+  void writeCachedMessageSnapshot(apiBaseUrl, conversationId, data);
+}
+
+export function clearCachedConversationData(conversationId: number) {
+  if (typeof window !== 'undefined') {
+    window.localStorage.removeItem(makeMessageCacheKey(conversationId));
+  }
+
+  void deleteCachedMessageSnapshot(apiBaseUrl, conversationId);
+  void deleteCachedConversationMedia(apiBaseUrl, conversationId);
+}
+
+export async function getCachedMessageMedia(message: Message) {
+  return readCachedMessageMedia(apiBaseUrl, message);
+}
+
+export function cacheMessageMedia(message: Message, blob: Blob, sourceUrl?: string | null) {
+  void writeCachedMessageMedia(apiBaseUrl, message, blob, sourceUrl);
+}
+
+export function clearCachedMessageMedia(messageId: number) {
+  void deleteCachedMessageMedia(apiBaseUrl, messageId);
 }
 
 export function getCachedContactsPage(query = '', limit = 300, cursor?: string | null) {
@@ -214,12 +265,16 @@ export async function sendConversationMessage(
   return data;
 }
 
-export async function uploadMedia(phoneNumberId: number, file: File) {
+export async function uploadMedia(phoneNumberId: number, file: File, onUploadProgress?: (progress: number) => void) {
   const { data } = await api.post<{ mediaId: string; mimeType?: string; fileName?: string }>(`/media/upload/${phoneNumberId}`, await file.arrayBuffer(), {
     headers: {
       'Content-Type': file.type || 'application/octet-stream',
       'x-file-name': file.name,
       'x-mime-type': file.type || 'application/octet-stream',
+    },
+    onUploadProgress: (event) => {
+      if (!onUploadProgress || !event.total) return;
+      onUploadProgress(Math.min(event.loaded / event.total, 1));
     },
   });
 
@@ -257,6 +312,11 @@ export async function listContactsPage(query = '', limit = 300, cursor?: string 
 
 export async function createContact(payload: { countryCode: string; phoneNumber: string; name: string }) {
   const { data } = await api.post<Contact>('/contacts', payload);
+  return data;
+}
+
+export async function renameContact(contactId: number, name: string) {
+  const { data } = await api.patch<Contact>(`/contacts/${contactId}`, { name });
   return data;
 }
 
@@ -378,6 +438,11 @@ export async function replaceContactListMembers(listId: number, contacts: Array<
     contacts,
   });
 
+  return data;
+}
+
+export async function renameContactList(listId: number, name: string) {
+  const { data } = await api.patch<ContactList>(`/contact-lists/${listId}`, { name });
   return data;
 }
 

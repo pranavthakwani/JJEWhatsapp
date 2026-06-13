@@ -100,7 +100,7 @@ function mapContact(row) {
 }
 
 function getContactDisplayName(row) {
-  return String(row?.profile_name || row?.business_directory_name || row?.phone_number || row?.wa_id || '').trim();
+  return String(row?.business_directory_name || row?.profile_name || row?.phone_number || row?.wa_id || '').trim();
 }
 
 function isAlphabeticContact(row) {
@@ -164,7 +164,7 @@ function mapConversation(row, contact, number) {
     phoneNumberId: row.phone_number_id,
     phoneNumberLabel: number?.display_name || null,
     contactId: row.contact_id,
-    contactName: contact?.profile_name || contact?.phone_number || contact?.wa_id || 'Unknown',
+    contactName: contact?.business_directory_name || contact?.profile_name || contact?.phone_number || contact?.wa_id || 'Unknown',
     contactPhone: contact?.phone_number || null,
     contactWaId: contact?.wa_id || '',
     contactOptInStatus: contact?.opt_in_status || 'unknown',
@@ -499,8 +499,8 @@ export async function listContacts({ search = '', limit = 100 }) {
     if (!ids || ids.length === 0) return [];
     const matchedContacts = [...(await fetchContactsByIds(ids.slice(0, limit))).values()].map(mapContact).filter(Boolean);
     return matchedContacts.sort((left, right) => (
-      (left.profileName || left.businessDirectoryName || left.waId)
-        .localeCompare(right.profileName || right.businessDirectoryName || right.waId)
+      (left.businessDirectoryName || left.profileName || left.waId)
+        .localeCompare(right.businessDirectoryName || right.profileName || right.waId)
     ));
   }
 
@@ -727,6 +727,28 @@ export async function upsertContact({
     .single();
 
   return mapContact(requireData(inserted));
+}
+
+export async function renameContact({ contactId, name }) {
+  const normalizedName = String(name || '').replace(/\s+/g, ' ').trim();
+  if (!Number.isInteger(contactId) || contactId <= 0) {
+    throw new Error('Valid contact ID is required');
+  }
+  if (!normalizedName) {
+    throw new Error('Contact name is required');
+  }
+
+  const updated = await supabase
+    .from('wa_contacts')
+    .update({
+      business_directory_name: normalizedName,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', contactId)
+    .select('*')
+    .maybeSingle();
+
+  return mapContact(requireData(updated));
 }
 
 export async function ensureConversation(phoneNumberDbId, contactId) {
@@ -1192,7 +1214,7 @@ export async function listStarredMessages({ phoneNumberId = null, limit = 100 } 
 
     return {
       ...message,
-      contactName: contact?.profile_name || contact?.phone_number || contact?.wa_id || 'Unknown',
+      contactName: contact?.business_directory_name || contact?.profile_name || contact?.phone_number || contact?.wa_id || 'Unknown',
       contactPhone: contact?.phone_number || null,
       contactWaId: contact?.wa_id || '',
       starredAt: message.starredAt,
@@ -1481,6 +1503,26 @@ export async function replaceContactListMembers({ listId, contacts = [] }) {
     .update({ updated_at: new Date().toISOString() })
     .eq('id', listId));
 
+  return getContactListById(listId);
+}
+
+export async function renameContactList({ listId, name }) {
+  const normalizedName = String(name || '').replace(/\s+/g, ' ').trim();
+  if (!normalizedName) {
+    throw new Error('Broadcast list name is required');
+  }
+
+  const updated = await supabase
+    .from('wa_contact_lists')
+    .update({
+      name: normalizedName,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', listId)
+    .select('id')
+    .maybeSingle();
+
+  if (!requireData(updated)) return null;
   return getContactListById(listId);
 }
 

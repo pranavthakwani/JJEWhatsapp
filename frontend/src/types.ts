@@ -105,6 +105,10 @@ export type Message = {
   caption: string | null;
   mediaId: string | null;
   mediaUrl: string | null;
+  storageBucket?: string | null;
+  storagePath?: string | null;
+  mediaSize?: number | null;
+  uploadProgress?: number | null;
   mimeType: string | null;
   fileName: string | null;
   templateName: string | null;
