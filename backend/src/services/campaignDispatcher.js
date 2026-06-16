@@ -60,6 +60,39 @@ function getCampaignMessagePayload(campaign, templateLanguage = campaign.templat
   };
 }
 
+function getDuplicateMessageLookup(campaign, templateLanguage = campaign.templateLanguage) {
+  if (campaign.mode === 'template') {
+    return {
+      messageType: 'template',
+      textBody: null,
+      caption: null,
+      mediaId: null,
+      templateName: campaign.templateName,
+      templateLanguage,
+    };
+  }
+
+  if (isMediaCampaign(campaign)) {
+    return {
+      messageType: campaign.mode,
+      textBody: null,
+      caption: campaign.mode === 'audio' ? null : campaign.bodyText,
+      mediaId: campaign.mediaId,
+      templateName: null,
+      templateLanguage: null,
+    };
+  }
+
+  return {
+    messageType: 'text',
+    textBody: campaign.bodyText,
+    caption: null,
+    mediaId: null,
+    templateName: null,
+    templateLanguage: null,
+  };
+}
+
 async function sendCampaignMessage({ number, campaign, to }) {
   if (isMediaCampaign(campaign)) {
     return sendMediaMessage({
@@ -80,6 +113,14 @@ async function sendCampaignMessage({ number, campaign, to }) {
 }
 
 async function processRecipient(number, campaign, recipient, io, templates = []) {
+  const claimed = await repo.claimCampaignRecipientForDispatch({
+    recipientId: recipient.id,
+    expectedStatuses: ['queued'],
+    nextStatus: 'dispatching',
+  });
+
+  if (!claimed) return;
+
   const contact = await repo.upsertContact({
     waId: recipient.recipientWaId,
     phoneNumber: recipient.recipientWaId,
@@ -100,12 +141,27 @@ async function processRecipient(number, campaign, recipient, io, templates = [])
             parameters: campaign.templateParams.map((value) => ({
               type: 'text',
               text: String(value),
-            })),
-          },
-        ]
+          })),
+        },
+      ]
       : [];
 
     sentTemplateLanguage = resolveTemplateLanguage(campaign, templates, campaign.templateName);
+    const duplicateMessage = await repo.findRecentDuplicateConversationMessage({
+      conversationId,
+      ...getDuplicateMessageLookup(campaign, sentTemplateLanguage),
+    });
+
+    if (duplicateMessage?.waMessageId) {
+      await repo.markCampaignRecipientSent({
+        recipientId: recipient.id,
+        contactId: contact.id,
+        conversationId,
+        waMessageId: duplicateMessage.waMessageId,
+      });
+      return;
+    }
+
     sendResult = await sendTemplateMessage({
       number,
       to: recipient.recipientWaId,
@@ -115,6 +171,21 @@ async function processRecipient(number, campaign, recipient, io, templates = [])
     });
   } else {
     if (hasOpenCustomerWindow(contact)) {
+      const duplicateMessage = await repo.findRecentDuplicateConversationMessage({
+        conversationId,
+        ...getDuplicateMessageLookup(campaign),
+      });
+
+      if (duplicateMessage?.waMessageId) {
+        await repo.markCampaignRecipientSent({
+          recipientId: recipient.id,
+          contactId: contact.id,
+          conversationId,
+          waMessageId: duplicateMessage.waMessageId,
+        });
+        return;
+      }
+
       sendResult = await sendCampaignMessage({
         number,
         to: recipient.recipientWaId,
@@ -131,6 +202,38 @@ async function processRecipient(number, campaign, recipient, io, templates = [])
       }
 
       sentTemplateLanguage = resolveTemplateLanguage(campaign, templates, templateName);
+      const duplicatePromptMessage = await repo.findRecentDuplicateConversationMessage({
+        conversationId,
+        messageType: 'template',
+        templateName,
+        templateLanguage: sentTemplateLanguage,
+      });
+
+      if (duplicatePromptMessage?.waMessageId) {
+        const nextStatus = shouldUseFollowup ? 'optin_followup_sent' : 'optin_initial_sent';
+
+        await repo.markCampaignRecipientAwaitingOptIn({
+          recipientId: recipient.id,
+          contactId: contact.id,
+          conversationId,
+          waMessageId: duplicatePromptMessage.waMessageId,
+          promptTemplateName: templateName,
+          nextStatus,
+          requestedAt: new Date(),
+        });
+
+        await repo.setContactOptInState(contact.id, {
+          status: shouldUseFollowup ? 'pending_followup' : 'pending_initial',
+          templateName,
+          source: 'campaign',
+          timestamp: new Date(),
+        });
+
+        const conversation = await repo.getConversationById(conversationId);
+        io.emit('conversation:updated', conversation);
+        return;
+      }
+
       sendResult = await sendTemplateMessage({
         number,
         to: recipient.recipientWaId,

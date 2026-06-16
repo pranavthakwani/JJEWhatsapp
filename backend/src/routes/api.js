@@ -8,6 +8,57 @@ import { getAuthStatus, listDevices, logoutUser, requireAppAccess, updateDevice 
 import { buildMessagePreview, normaliseRecipientWaId } from '../utils/messageFormat.js';
 import { logger } from '../utils/logger.js';
 
+const recentRequestCache = new Map();
+
+function stableRequestValue(value) {
+  if (Array.isArray(value)) return value.map(stableRequestValue);
+
+  if (value && typeof value === 'object') {
+    return Object.keys(value)
+      .sort()
+      .reduce((result, key) => {
+        result[key] = stableRequestValue(value[key]);
+        return result;
+      }, {});
+  }
+
+  return value ?? null;
+}
+
+function buildRecentRequestKey(scope, payload) {
+  return `${scope}:${JSON.stringify(stableRequestValue(payload))}`;
+}
+
+async function withRecentRequestDedup(scope, payload, factory, windowMs = 15000) {
+  const key = buildRecentRequestKey(scope, payload);
+  const now = Date.now();
+  const existing = recentRequestCache.get(key);
+
+  if (existing && (now - existing.startedAt) <= windowMs) {
+    return existing.promise;
+  }
+
+  const promise = (async () => {
+    try {
+      return await factory();
+    } finally {
+      setTimeout(() => {
+        const current = recentRequestCache.get(key);
+        if (current?.promise === promise) {
+          recentRequestCache.delete(key);
+        }
+      }, windowMs);
+    }
+  })();
+
+  recentRequestCache.set(key, {
+    startedAt: now,
+    promise,
+  });
+
+  return promise;
+}
+
 function isApprovedTemplate(template) {
   return String(template?.status || '').toLowerCase() === 'approved';
 }
@@ -78,6 +129,23 @@ function resolveOptInTemplateKind(conversation, requestedKind) {
 
 function isBroadcastMediaMode(mode) {
   return ['image', 'video', 'audio', 'document'].includes(mode);
+}
+
+function dedupeRecipientsByWaId(recipients = []) {
+  const uniqueRecipients = [];
+  const seenWaIds = new Set();
+
+  for (const recipient of recipients) {
+    const waId = normaliseRecipientWaId(recipient?.waId || recipient?.phoneNumber || recipient?.number);
+    if (!waId || seenWaIds.has(waId)) continue;
+    seenWaIds.add(waId);
+    uniqueRecipients.push({
+      ...recipient,
+      waId,
+    });
+  }
+
+  return uniqueRecipients;
 }
 
 function sanitizeDownloadFileName(fileName, fallback = 'media') {
@@ -393,38 +461,63 @@ export function createApiRouter(io) {
         return;
       }
 
-      const sendResult = await sendTemplateMessage({
-        number,
-        to: conversation.contactWaId,
-        templateName: selectedTemplateName,
-        languageCode: req.body?.templateLanguage || selectedTemplateLanguage,
-        components: [],
-      });
-
-      const message = await repo.createConversationMessageFromSend({
-        conversationId: conversation.id,
-        phoneNumberId: conversation.phoneNumberId,
-        contactId: conversation.contactId,
-        responseMessageId: sendResult.messageId,
-        payload: {
-          messageType: 'template',
+      const responsePayload = await withRecentRequestDedup(
+        'conversation-opt-in',
+        {
+          conversationId: conversation.id,
           templateName: selectedTemplateName,
           templateLanguage: req.body?.templateLanguage || selectedTemplateLanguage,
+          templateKind,
         },
-      });
+        async () => {
+          const duplicateOptInMessage = await repo.findRecentDuplicateConversationMessage({
+            conversationId: conversation.id,
+            messageType: 'template',
+            templateName: selectedTemplateName,
+            templateLanguage: req.body?.templateLanguage || selectedTemplateLanguage,
+          });
 
-      await repo.setContactOptInState(conversation.contactId, {
-        status: pendingStatus,
-        templateName: selectedTemplateName,
-        source: `manual-chat-${templateKind}`,
-        timestamp: new Date(),
-      });
+          if (duplicateOptInMessage) {
+            const updatedConversation = await repo.getConversationById(conversation.id);
+            return { message: duplicateOptInMessage, conversation: updatedConversation, deduped: true };
+          }
 
-      const updatedConversation = await repo.getConversationById(conversation.id);
-      io.emit('message:created', message);
-      io.emit('conversation:updated', updatedConversation);
+          const sendResult = await sendTemplateMessage({
+            number,
+            to: conversation.contactWaId,
+            templateName: selectedTemplateName,
+            languageCode: req.body?.templateLanguage || selectedTemplateLanguage,
+            components: [],
+          });
 
-      res.json({ message, conversation: updatedConversation });
+          const message = await repo.createConversationMessageFromSend({
+            conversationId: conversation.id,
+            phoneNumberId: conversation.phoneNumberId,
+            contactId: conversation.contactId,
+            responseMessageId: sendResult.messageId,
+            payload: {
+              messageType: 'template',
+              templateName: selectedTemplateName,
+              templateLanguage: req.body?.templateLanguage || selectedTemplateLanguage,
+            },
+          });
+
+          await repo.setContactOptInState(conversation.contactId, {
+            status: pendingStatus,
+            templateName: selectedTemplateName,
+            source: `manual-chat-${templateKind}`,
+            timestamp: new Date(),
+          });
+
+          const updatedConversation = await repo.getConversationById(conversation.id);
+          io.emit('message:created', message);
+          io.emit('conversation:updated', updatedConversation);
+
+          return { message, conversation: updatedConversation };
+        },
+      );
+
+      res.json(responsePayload);
     } catch (error) {
       next(error);
     }
@@ -461,85 +554,121 @@ export function createApiRouter(io) {
         emoji = null,
       } = req.body || {};
 
-      let sendResult;
-      if (type === 'template') {
-        sendResult = await sendTemplateMessage({
-          number,
-          to: conversation.contactWaId,
-          templateName,
-          languageCode: templateLanguage,
-          components: templateParams.length > 0
-            ? [
-                {
-                  type: 'body',
-                  parameters: templateParams.map((value) => ({
-                    type: 'text',
-                    text: String(value),
-                  })),
-                },
-              ]
-            : [],
-        });
-      } else if (type === 'image' || type === 'document' || type === 'video' || type === 'audio') {
-        sendResult = await sendMediaMessage({
-          number,
-          to: conversation.contactWaId,
-          mediaType: type,
-          mediaId,
-          caption,
-          fileName,
-          replyToWaMessageId,
-        });
-      } else if (type === 'reaction') {
-        if (!replyToWaMessageId || emoji === null || emoji === undefined) {
-          res.status(400).json({ error: 'replyToWaMessageId and emoji are required for reactions' });
-          return;
-        }
-
-        sendResult = await sendReactionMessage({
-          number,
-          to: conversation.contactWaId,
-          emoji,
-          replyToWaMessageId,
-        });
-      } else {
-        sendResult = await sendTextMessage({
-          number,
-          to: conversation.contactWaId,
-          body: text,
-          replyToWaMessageId,
-        });
-      }
-
-      const message = await repo.createConversationMessageFromSend({
-        conversationId: conversation.id,
-        phoneNumberId: conversation.phoneNumberId,
-        contactId: conversation.contactId,
-        responseMessageId: sendResult.messageId,
-        payload: {
-          messageType: type,
-          textBody: text,
+      const message = await withRecentRequestDedup(
+        'conversation-message',
+        {
+          conversationId: conversation.id,
+          type,
+          text: type === 'reaction' ? emoji : text,
           caption,
           mediaId,
-          storageBucket,
-          storagePath,
-          mediaSize,
-          mimeType,
-          fileName,
-          replyToWaMessageId,
-          textBody: type === 'reaction' ? emoji : text,
           templateName,
           templateLanguage,
           templateParams,
+          replyToWaMessageId,
         },
-      });
+        async () => {
+          const duplicateMessage = await repo.findRecentDuplicateConversationMessage({
+            conversationId: conversation.id,
+            messageType: type,
+            textBody: type === 'reaction' ? emoji : text,
+            caption,
+            mediaId,
+            templateName,
+            templateLanguage,
+            replyToWaMessageId,
+          });
 
-      const updatedConversation = await repo.getConversationById(conversation.id);
-      io.emit('message:created', message);
-      io.emit('conversation:updated', updatedConversation);
+          if (duplicateMessage) {
+            return duplicateMessage;
+          }
+
+          let sendResult;
+          if (type === 'template') {
+            sendResult = await sendTemplateMessage({
+              number,
+              to: conversation.contactWaId,
+              templateName,
+              languageCode: templateLanguage,
+              components: templateParams.length > 0
+                ? [
+                    {
+                      type: 'body',
+                      parameters: templateParams.map((value) => ({
+                        type: 'text',
+                        text: String(value),
+                      })),
+                    },
+                  ]
+                : [],
+            });
+          } else if (type === 'image' || type === 'document' || type === 'video' || type === 'audio') {
+            sendResult = await sendMediaMessage({
+              number,
+              to: conversation.contactWaId,
+              mediaType: type,
+              mediaId,
+              caption,
+              fileName,
+              replyToWaMessageId,
+            });
+          } else if (type === 'reaction') {
+            if (!replyToWaMessageId || emoji === null || emoji === undefined) {
+              throw new Error('replyToWaMessageId and emoji are required for reactions');
+            }
+
+            sendResult = await sendReactionMessage({
+              number,
+              to: conversation.contactWaId,
+              emoji,
+              replyToWaMessageId,
+            });
+          } else {
+            sendResult = await sendTextMessage({
+              number,
+              to: conversation.contactWaId,
+              body: text,
+              replyToWaMessageId,
+            });
+          }
+
+          const createdMessage = await repo.createConversationMessageFromSend({
+            conversationId: conversation.id,
+            phoneNumberId: conversation.phoneNumberId,
+            contactId: conversation.contactId,
+            responseMessageId: sendResult.messageId,
+            payload: {
+              messageType: type,
+              textBody: text,
+              caption,
+              mediaId,
+              storageBucket,
+              storagePath,
+              mediaSize,
+              mimeType,
+              fileName,
+              replyToWaMessageId,
+              textBody: type === 'reaction' ? emoji : text,
+              templateName,
+              templateLanguage,
+              templateParams,
+            },
+          });
+
+          const updatedConversation = await repo.getConversationById(conversation.id);
+          io.emit('message:created', createdMessage);
+          io.emit('conversation:updated', updatedConversation);
+
+          return createdMessage;
+        },
+      );
 
       res.json(message);
     } catch (error) {
+      if (error.message === 'replyToWaMessageId and emoji are required for reactions') {
+        res.status(400).json({ error: error.message });
+        return;
+      }
       next(error);
     }
   });
@@ -1125,6 +1254,8 @@ export function createApiRouter(io) {
         })).filter((recipient) => recipient.waId);
       }
 
+      recipients = dedupeRecipientsByWaId(recipients);
+
       if (recipients.length === 0) {
         res.status(400).json({ error: 'At least one recipient is required' });
         return;
@@ -1161,24 +1292,66 @@ export function createApiRouter(io) {
         return;
       }
 
-      const campaign = await repo.createCampaign({
-        phoneNumberId: Number(body.phoneNumberId),
-        contactListId,
-        title: body.title || `Campaign ${new Date().toLocaleString('en-IN')}`,
-        mode,
-        bodyText: body.bodyText || null,
-        mediaId: body.mediaId || null,
-        mimeType: body.mimeType || null,
-        fileName: body.fileName || null,
-        templateName: body.templateName || null,
-        initialTemplateName: textBroadcastTemplates.initialTemplateName,
-        followupTemplateName: textBroadcastTemplates.followupTemplateName,
-        templateLanguage: textBroadcastTemplates.templateLanguage,
-        templateParams: Array.isArray(body.templateParams) ? body.templateParams : [],
-        recipients,
-      });
+      const resolvedTitle = body.title || `Campaign ${new Date().toLocaleString('en-IN')}`;
+      const detail = await withRecentRequestDedup(
+        'campaign-create',
+        {
+          phoneNumberId: Number(body.phoneNumberId),
+          contactListId,
+          title: resolvedTitle,
+          mode,
+          bodyText: body.bodyText || null,
+          mediaId: body.mediaId || null,
+          mimeType: body.mimeType || null,
+          fileName: body.fileName || null,
+          templateName: body.templateName || null,
+          initialTemplateName: textBroadcastTemplates.initialTemplateName,
+          followupTemplateName: textBroadcastTemplates.followupTemplateName,
+          templateLanguage: textBroadcastTemplates.templateLanguage,
+          templateParams: Array.isArray(body.templateParams) ? body.templateParams : [],
+          recipients: recipients.map((recipient) => ({
+            waId: recipient.waId,
+            contactId: recipient.contactId || null,
+          })),
+        },
+        async () => {
+          const duplicateCampaign = await repo.findRecentDuplicateCampaign({
+            phoneNumberId: Number(body.phoneNumberId),
+            contactListId,
+            title: resolvedTitle,
+            mode,
+            bodyText: body.bodyText || null,
+            mediaId: body.mediaId || null,
+            templateName: body.templateName || null,
+            templateLanguage: textBroadcastTemplates.templateLanguage,
+            templateParams: Array.isArray(body.templateParams) ? body.templateParams : [],
+          });
 
-      const detail = await repo.getCampaignById(campaign.id);
+          if (duplicateCampaign) {
+            return repo.getCampaignById(duplicateCampaign.id);
+          }
+
+          const campaign = await repo.createCampaign({
+            phoneNumberId: Number(body.phoneNumberId),
+            contactListId,
+            title: resolvedTitle,
+            mode,
+            bodyText: body.bodyText || null,
+            mediaId: body.mediaId || null,
+            mimeType: body.mimeType || null,
+            fileName: body.fileName || null,
+            templateName: body.templateName || null,
+            initialTemplateName: textBroadcastTemplates.initialTemplateName,
+            followupTemplateName: textBroadcastTemplates.followupTemplateName,
+            templateLanguage: textBroadcastTemplates.templateLanguage,
+            templateParams: Array.isArray(body.templateParams) ? body.templateParams : [],
+            recipients,
+          });
+
+          return repo.getCampaignById(campaign.id);
+        },
+      );
+
       io.emit('campaign:updated', detail);
       res.status(201).json(detail);
     } catch (error) {

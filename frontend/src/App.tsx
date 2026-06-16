@@ -132,6 +132,54 @@ function resolveIsMobileLayout() {
   return window.matchMedia('(max-width: 720px)').matches;
 }
 
+function isKeyboardFocusTarget(element: Element | null) {
+  return element instanceof HTMLElement
+    && (
+      element.tagName === 'TEXTAREA'
+      || element.tagName === 'INPUT'
+      || element.isContentEditable
+    );
+}
+
+function resolveViewportShellHeight() {
+  if (typeof window === 'undefined') return 0;
+
+  const innerHeight = window.innerHeight || 0;
+  const visualViewportHeight = window.visualViewport?.height || 0;
+  const keyboardLikelyOpen = isKeyboardFocusTarget(document.activeElement)
+    && visualViewportHeight > 0
+    && innerHeight > 0
+    && visualViewportHeight < innerHeight - 120;
+
+  if (keyboardLikelyOpen) {
+    return visualViewportHeight;
+  }
+
+  return innerHeight || visualViewportHeight;
+}
+
+function resetMobileViewportShell() {
+  if (typeof window === 'undefined') return;
+
+  const activeElement = document.activeElement;
+  if (activeElement instanceof HTMLElement && activeElement !== document.body) {
+    activeElement.blur();
+  }
+
+  const applyViewport = () => {
+    const height = resolveViewportShellHeight();
+    document.documentElement.style.setProperty('--jjewa-viewport-height', `${height}px`);
+    document.documentElement.style.setProperty('--jjewa-viewport-offset-top', '0px');
+    window.scrollTo(0, 0);
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+  };
+
+  applyViewport();
+  window.requestAnimationFrame(applyViewport);
+  window.setTimeout(applyViewport, 120);
+}
+
 function mergeMessageUpdate(existing: Message, incoming: Message) {
   const existingRank = MESSAGE_STATUS_RANK[existing.status] ?? -1;
   const incomingRank = MESSAGE_STATUS_RANK[incoming.status] ?? -1;
@@ -483,8 +531,8 @@ export default function App() {
 
   useEffect(() => {
     function syncViewportHeight() {
-      const height = window.visualViewport?.height || window.innerHeight;
-      const offsetTop = window.visualViewport?.offsetTop || 0;
+      const height = resolveViewportShellHeight();
+      const offsetTop = 0;
       document.documentElement.style.setProperty('--jjewa-viewport-height', `${height}px`);
       document.documentElement.style.setProperty('--jjewa-viewport-offset-top', `${offsetTop}px`);
     }
@@ -512,6 +560,12 @@ export default function App() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!isMobileLayout || (!activeConversation && !activeContactListId)) return;
+
+    resetMobileViewportShell();
+  }, [isMobileLayout, activeConversation?.id, activeContactListId]);
 
   useEffect(() => {
     if (canUseApp) {
@@ -1105,6 +1159,7 @@ export default function App() {
       contactId: contact.id,
     });
 
+    resetMobileViewportShell();
     setActiveContactListId(null);
     setActiveContactList(null);
     setActiveConversation(conversation);
@@ -1206,6 +1261,7 @@ export default function App() {
   }
 
   function handleBackToMobileList() {
+    resetMobileViewportShell();
     setActiveConversation(null);
     setActiveContactListId(null);
     setActiveContactList(null);
@@ -1270,6 +1326,7 @@ export default function App() {
           onSearchChange={setSearch}
           onToggleTheme={toggleTheme}
           onSelectPhoneNumber={(phoneNumberId) => {
+            resetMobileViewportShell();
             setSelectedPhoneNumberId(phoneNumberId);
             setActiveConversation(null);
             setActiveContactListId(null);
@@ -1277,12 +1334,14 @@ export default function App() {
           }}
           onSelectConversation={(conversationId) => {
             const selected = conversations.find((conversation) => conversation.id === conversationId) || null;
+            resetMobileViewportShell();
             setActiveContactListId(null);
             setActiveContactList(null);
             setActiveConversation(selected);
           }}
           onSelectContactList={(contactListId) => {
             const selected = contactLists.find((list) => list.id === contactListId) || null;
+            resetMobileViewportShell();
             setActiveConversation(null);
             setActiveContactListId(contactListId);
             setActiveContactList(selected);

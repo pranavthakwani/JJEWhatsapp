@@ -149,6 +149,10 @@ function shouldSubmitOnEnter() {
   return window.matchMedia('(hover: hover) and (pointer: fine)').matches;
 }
 
+function shouldAutoFocusComposer() {
+  return shouldSubmitOnEnter();
+}
+
 function resizeComposerTextarea(textarea: HTMLTextAreaElement | null) {
   if (!textarea) return;
 
@@ -1274,7 +1278,9 @@ export function ChatWindow({
 
   function handleEmojiClick(emojiData: EmojiClickData) {
     setDraft((current) => `${current}${emojiData.emoji}`);
-    textareaRef.current?.focus();
+    if (shouldAutoFocusComposer()) {
+      textareaRef.current?.focus();
+    }
   }
 
   async function handleReactionClick(message: Message, emoji: string) {
@@ -1454,7 +1460,9 @@ export function ChatWindow({
 
   function handleToggleEmojiPicker() {
     setEmojiPickerOpen((current) => !current);
-    textareaRef.current?.focus();
+    if (shouldAutoFocusComposer()) {
+      textareaRef.current?.focus();
+    }
   }
 
   function requestOlderMessages() {
@@ -1696,7 +1704,9 @@ export function ChatWindow({
                       title="Reply"
                       onClick={() => {
                         setReplyTarget(item.message);
-                        textareaRef.current?.focus();
+                        if (shouldAutoFocusComposer()) {
+                          textareaRef.current?.focus();
+                        }
                       }}
                     >
                       <Reply size={14} />
@@ -2009,7 +2019,9 @@ export function ChatWindow({
                   onClick={() => {
                     setReplyTarget(actionMessage);
                     setActionMessage(null);
-                    textareaRef.current?.focus();
+                    if (shouldAutoFocusComposer()) {
+                      textareaRef.current?.focus();
+                    }
                   }}
                 >
                   <Reply size={18} />

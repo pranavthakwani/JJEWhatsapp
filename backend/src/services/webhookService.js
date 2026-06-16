@@ -87,6 +87,28 @@ function buildDeferredCampaignPayload(campaign) {
   };
 }
 
+function getDeferredDuplicateLookup(campaign) {
+  if (isMediaCampaign(campaign)) {
+    return {
+      messageType: campaign.mode,
+      textBody: null,
+      caption: campaign.mode === 'audio' ? null : campaign.bodyText,
+      mediaId: campaign.mediaId,
+      templateName: null,
+      templateLanguage: null,
+    };
+  }
+
+  return {
+    messageType: 'text',
+    textBody: campaign.bodyText,
+    caption: null,
+    mediaId: null,
+    templateName: null,
+    templateLanguage: null,
+  };
+}
+
 export async function handleMetaWebhook(payload, io) {
   let messagesProcessed = 0;
   let statusesProcessed = 0;
@@ -120,6 +142,16 @@ export async function handleMetaWebhook(payload, io) {
       );
 
       for (const message of value.messages || []) {
+        const existingMessage = await repo.getMessageByWaMessageId(message.id);
+        if (existingMessage) {
+          logger.info('Duplicate inbound message ignored', {
+            waMessageId: message.id,
+            phoneNumberId,
+            contactWaId: message.from,
+          });
+          continue;
+        }
+
         const waId = message.from;
         const contactMeta = contactsByWaId.get(waId) || {};
         const contact = await repo.upsertContact({
@@ -182,7 +214,37 @@ export async function handleMetaWebhook(payload, io) {
           for (const item of pendingRecipients) {
             if (!item.campaign?.bodyText && !item.campaign?.mediaId) continue;
 
+            const claimed = await repo.claimCampaignRecipientForDispatch({
+              recipientId: item.recipient.id,
+              expectedStatuses: ['optin_initial_sent', 'optin_followup_sent'],
+              nextStatus: 'dispatching_after_optin',
+            });
+
+            if (!claimed) continue;
+
             try {
+              const duplicateMessage = await repo.findRecentDuplicateConversationMessage({
+                conversationId,
+                ...getDeferredDuplicateLookup(item.campaign),
+              });
+
+              if (duplicateMessage?.waMessageId) {
+                await repo.markCampaignRecipientSent({
+                  recipientId: item.recipient.id,
+                  contactId: contact.id,
+                  conversationId,
+                  waMessageId: duplicateMessage.waMessageId,
+                  optedInAt: waTimestamp,
+                });
+
+                await repo.refreshCampaignCounts(item.campaign.id);
+                await repo.completeCampaignIfFinished(item.campaign.id);
+
+                const updatedCampaign = await repo.getCampaignById(item.campaign.id);
+                io.emit('campaign:updated', updatedCampaign);
+                continue;
+              }
+
               const sendResult = await sendDeferredCampaignMessage({
                 number,
                 campaign: item.campaign,

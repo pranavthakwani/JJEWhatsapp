@@ -1104,11 +1104,93 @@ export async function listMessages({ conversationId, limit = 50, cursor }) {
   };
 }
 
+function getContactIdentityKey(contact) {
+  if (!contact) return null;
+
+  const waId = normaliseRecipientWaId(contact.waId || contact.phoneNumber);
+  if (waId) return `wa:${waId}`;
+  if (contact.id) return `id:${contact.id}`;
+  return null;
+}
+
+function dedupeContactsByIdentity(contacts = []) {
+  const uniqueContacts = [];
+  const seen = new Set();
+
+  for (const contact of contacts) {
+    const key = getContactIdentityKey(contact);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    uniqueContacts.push(contact);
+  }
+
+  return uniqueContacts;
+}
+
+export async function findRecentDuplicateConversationMessage({
+  conversationId,
+  messageType,
+  textBody = null,
+  caption = null,
+  mediaId = null,
+  templateName = null,
+  templateLanguage = null,
+  replyToWaMessageId = null,
+  windowSeconds = 6,
+}) {
+  const windowStart = new Date(Date.now() - (windowSeconds * 1000)).toISOString();
+  let query = supabase
+    .from('wa_messages')
+    .select('*')
+    .eq('conversation_id', conversationId)
+    .eq('direction', 'outbound')
+    .eq('message_type', messageType)
+    .is('deleted_at', null)
+    .gte('created_at', windowStart)
+    .order('created_at', { ascending: false })
+    .limit(5);
+
+  query = replyToWaMessageId
+    ? query.eq('parent_wa_message_id', replyToWaMessageId)
+    : query.is('parent_wa_message_id', null);
+
+  const rows = requireData(await query);
+  const normalisedTextBody = normaliseRecentDuplicateValue(textBody);
+  const normalisedCaption = normaliseRecentDuplicateValue(caption);
+  const normalisedMediaId = normaliseRecentDuplicateValue(mediaId);
+  const normalisedTemplateName = normaliseRecentDuplicateValue(templateName);
+  const normalisedTemplateLanguage = normaliseRecentDuplicateValue(templateLanguage);
+
+  const match = rows.find((row) => {
+    if (row.status === 'failed') return false;
+    if (normaliseRecentDuplicateValue(row.text_body) !== normalisedTextBody) return false;
+    if (normaliseRecentDuplicateValue(row.caption) !== normalisedCaption) return false;
+    if (normaliseRecentDuplicateValue(row.media_id) !== normalisedMediaId) return false;
+    if (normaliseRecentDuplicateValue(row.template_name) !== normalisedTemplateName) return false;
+    if (normaliseRecentDuplicateValue(row.template_language) !== normalisedTemplateLanguage) return false;
+    return true;
+  });
+
+  return match ? mapMessage(match) : null;
+}
+
 export async function getMessageById(id) {
   const result = await supabase
     .from('wa_messages')
     .select('*')
     .eq('id', id)
+    .maybeSingle();
+
+  return mapMessage(requireData(result));
+}
+
+export async function getMessageByWaMessageId(waMessageId) {
+  if (!waMessageId) return null;
+
+  const result = await supabase
+    .from('wa_messages')
+    .select('*')
+    .eq('wa_message_id', waMessageId)
     .maybeSingle();
 
   return mapMessage(requireData(result));
@@ -1448,8 +1530,10 @@ export async function createContactList({ phoneNumberId, name, source = 'manual'
     ...existingContacts,
     ...(await bulkUpsertContacts(rawContacts)),
   ];
-  if (upsertedContacts.length > 0) {
-    const memberRows = upsertedContacts.map((contact, index) => ({
+  const dedupedContacts = dedupeContactsByIdentity(upsertedContacts);
+
+  if (dedupedContacts.length > 0) {
+    const memberRows = dedupedContacts.map((contact, index) => ({
         list_id: insertedList.id,
         contact_id: contact.id,
         position: index,
@@ -1477,7 +1561,7 @@ export async function replaceContactListMembers({ listId, contacts = [] }) {
     ...(await bulkUpsertContacts(rawContacts)),
   ];
 
-  const dedupedContacts = [...new Map(upsertedContacts.map((contact) => [contact.id, contact])).values()];
+  const dedupedContacts = dedupeContactsByIdentity(upsertedContacts);
 
   requireData(await supabase
     .from('wa_contact_list_members')
@@ -1538,6 +1622,54 @@ export async function clearContactList(listId) {
     .eq('id', listId));
 
   return getContactListById(listId);
+}
+
+function normaliseRecentDuplicateValue(value) {
+  if (value === null || value === undefined) return null;
+  const normalised = String(value).trim();
+  return normalised.length > 0 ? normalised : null;
+}
+
+export async function findRecentDuplicateCampaign({
+  phoneNumberId,
+  contactListId = null,
+  title = null,
+  mode,
+  bodyText = null,
+  mediaId = null,
+  templateName = null,
+  templateLanguage = null,
+  templateParams = [],
+  windowSeconds = 20,
+}) {
+  const windowStart = new Date(Date.now() - (windowSeconds * 1000)).toISOString();
+  let query = supabase
+    .from('wa_campaigns')
+    .select('*')
+    .eq('phone_number_id', phoneNumberId)
+    .eq('mode', mode)
+    .gte('created_at', windowStart)
+    .order('created_at', { ascending: false })
+    .limit(5);
+
+  query = contactListId ? query.eq('contact_list_id', contactListId) : query.is('contact_list_id', null);
+  const rows = requireData(await query);
+
+  const normalisedBodyText = normaliseRecentDuplicateValue(bodyText);
+  const normalisedMediaId = normaliseRecentDuplicateValue(mediaId);
+  const normalisedTemplateName = normaliseRecentDuplicateValue(templateName);
+  const normalisedTemplateLanguage = normaliseRecentDuplicateValue(templateLanguage);
+  const normalisedTemplateParams = JSON.stringify(Array.isArray(templateParams) ? templateParams : []);
+
+  const match = rows.find((row) => {
+    if (normaliseRecentDuplicateValue(row.body_text) !== normalisedBodyText) return false;
+    if (normaliseRecentDuplicateValue(row.media_id) !== normalisedMediaId) return false;
+    if (normaliseRecentDuplicateValue(row.template_name) !== normalisedTemplateName) return false;
+    if (normaliseRecentDuplicateValue(row.template_language) !== normalisedTemplateLanguage) return false;
+    return JSON.stringify(row.template_params_json || []) === normalisedTemplateParams;
+  });
+
+  return match ? mapCampaign(match) : null;
 }
 
 export async function archiveContactList(listId) {
@@ -1783,6 +1915,25 @@ export async function getQueuedCampaignRecipients(campaignId, limit = 15) {
   }));
 }
 
+export async function claimCampaignRecipientForDispatch({
+  recipientId,
+  expectedStatuses,
+  nextStatus,
+}) {
+  const claimed = await supabase
+    .from('wa_campaign_recipients')
+    .update({
+      status: nextStatus,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', recipientId)
+    .in('status', expectedStatuses)
+    .select('id')
+    .maybeSingle();
+
+  return Boolean(requireData(claimed)?.id);
+}
+
 export async function markCampaignRecipientSent({ recipientId, contactId, conversationId, waMessageId, optedInAt = null }) {
   const updatePayload = {
     contact_id: contactId,
@@ -1925,8 +2076,8 @@ export async function completeCampaignIfFinished(campaignId) {
     .select('status')
     .eq('campaign_id', campaignId));
 
-  const queuedCount = rows.filter((row) => row.status === 'queued').length;
-  if (queuedCount > 0) return false;
+  const inFlightCount = rows.filter((row) => ['queued', 'dispatching', 'dispatching_after_optin'].includes(row.status)).length;
+  if (inFlightCount > 0) return false;
 
   const waitingOptInCount = rows.filter((row) => ['optin_initial_sent', 'optin_followup_sent'].includes(row.status)).length;
 

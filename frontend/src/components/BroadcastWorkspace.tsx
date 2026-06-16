@@ -3,7 +3,6 @@ import {
   ArrowLeft,
   Bell,
   BellOff,
-  Check,
   CheckCheck,
   ChevronDown,
   ChevronUp,
@@ -69,14 +68,36 @@ type BroadcastTimelineItem =
   | { type: 'optimistic'; key: string; item: OptimisticBroadcast };
 
 type DeliveryGroupKey = 'notDelivered' | 'delivered' | 'seen' | 'underOptation';
+type BroadcastAutocompleteSnippet = {
+  label: string;
+  value: string;
+  keywords?: string[];
+};
 
 const DELIVERY_GROUP_PAGES: DeliveryGroupKey[][] = [
   ['seen', 'delivered'],
   ['notDelivered', 'underOptation'],
 ];
 
+const BROADCAST_AUTOCOMPLETE_SNIPPETS: BroadcastAutocompleteSnippet[] = [
+  { label: 'Fresh with GST', value: 'Fresh with GST', keywords: ['fresh', 'gst'] },
+  { label: 'Active', value: 'Active', keywords: ['active', 'stock'] },
+  { label: 'Today Dispatch', value: 'Today Dispatch', keywords: ['today dispatch', 'today'] },
+  { label: 'Tomorrow Dispatch', value: 'Tomorrow Dispatch', keywords: ['tomorrow dispatch', 'tomorrow'] },
+  { label: 'Dispatch in 2-3 days', value: 'Dispatch in 2-3 days', keywords: ['dispatch', '2-3 days', '2 3 days'] },
+  { label: 'Model:', value: 'Model: ', keywords: ['model', 'modal'] },
+  { label: 'RAM:', value: 'RAM: ', keywords: ['ram'] },
+  { label: 'ROM:', value: 'ROM: ', keywords: ['rom'] },
+  { label: 'Price:', value: 'Price: ', keywords: ['price', 'rate'] },
+  { label: 'TC:', value: 'TC: ', keywords: ['tc'] },
+  { label: 'Color:', value: 'Color: ', keywords: ['color', 'colour'] },
+  { label: 'Qty:', value: 'Qty: ', keywords: ['qty', 'quantity'] },
+  { label: 'Brand:', value: 'Brand: ', keywords: ['brand'] },
+];
+
 const CONTACT_FETCH_LIMIT = 50000;
 const OPT_IN_WAITING_STATUSES = new Set(['optin_initial_sent', 'optin_followup_sent']);
+const CAMPAIGN_SUCCESS_STATUSES = new Set(['sent', 'delivered', 'read']);
 const VOICE_RECORDER_MIME_TYPES = [
   'audio/ogg;codecs=opus',
   'audio/webm;codecs=opus',
@@ -87,6 +108,10 @@ const VOICE_RECORDER_MIME_TYPES = [
 function shouldSubmitOnEnter() {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return true;
   return window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+}
+
+function shouldAutoFocusComposer() {
+  return shouldSubmitOnEnter();
 }
 
 function resizeComposerTextarea(textarea: HTMLTextAreaElement | null) {
@@ -206,6 +231,126 @@ function getRecipientName(recipient: CampaignRecipient) {
   return recipient.recipientName || recipient.recipientWaId;
 }
 
+function normalizeAutocompleteText(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function getComposerLineContext(text: string, selectionStart: number, selectionEnd: number) {
+  const start = Math.max(0, Math.min(selectionStart, text.length));
+  const end = Math.max(start, Math.min(selectionEnd, text.length));
+  const lineStart = text.lastIndexOf('\n', start - 1) + 1;
+  const nextLineBreak = text.indexOf('\n', end);
+  const lineEnd = nextLineBreak === -1 ? text.length : nextLineBreak;
+  const rawLine = text.slice(lineStart, lineEnd);
+  const leadingWhitespace = rawLine.match(/^\s*/)?.[0] || '';
+  const query = rawLine.trim();
+
+  return { lineStart, lineEnd, rawLine, leadingWhitespace, query };
+}
+
+function getBroadcastAutocompleteSuggestions(query: string) {
+  const normalizedQuery = normalizeAutocompleteText(query);
+  if (normalizedQuery.length < 2) return [];
+
+  return BROADCAST_AUTOCOMPLETE_SNIPPETS
+    .map((snippet) => {
+      const candidates = [snippet.label, snippet.value, ...(snippet.keywords || [])]
+        .map(normalizeAutocompleteText)
+        .filter(Boolean);
+
+      let score = 0;
+      for (const candidate of candidates) {
+        if (candidate === normalizedQuery) {
+          score = Math.max(score, 500);
+          continue;
+        }
+        if (candidate.startsWith(normalizedQuery)) {
+          score = Math.max(score, 380 - Math.max(candidate.length - normalizedQuery.length, 0));
+          continue;
+        }
+        if (candidate.split(' ').some((part) => part.startsWith(normalizedQuery))) {
+          score = Math.max(score, 260);
+          continue;
+        }
+        if (candidate.includes(normalizedQuery)) {
+          score = Math.max(score, 140);
+        }
+      }
+
+      return { ...snippet, score };
+    })
+    .filter((snippet) => snippet.score > 0 && normalizeAutocompleteText(snippet.value) !== normalizedQuery)
+    .sort((left, right) => right.score - left.score || left.label.localeCompare(right.label))
+    .slice(0, 5);
+}
+
+function getRecipientFailureReason(recipient: CampaignRecipient) {
+  const reason = String(recipient.errorMessage || '').trim();
+  if (!reason) return 'Meta did not return a delivery reason.';
+
+  if (reason.includes('131049')) {
+    return 'Meta engagement block (131049). Ask the customer to message first, then send again inside the 24-hour window.';
+  }
+
+  if (reason.includes('132001')) {
+    return 'Template/language mismatch (132001). Sync templates and verify the approved language translation exists.';
+  }
+
+  return reason;
+}
+
+function getCampaignStatusSummary(campaign: Campaign) {
+  const recipients = campaign.recipients || [];
+  let successCount = 0;
+  let deliveredCount = 0;
+  let readCount = 0;
+  let failedCount = 0;
+  let queuedCount = 0;
+  let optInCount = 0;
+
+  for (const recipient of recipients) {
+    if (OPT_IN_WAITING_STATUSES.has(recipient.status)) {
+      optInCount += 1;
+      continue;
+    }
+
+    if (recipient.status === 'read') {
+      successCount += 1;
+      deliveredCount += 1;
+      readCount += 1;
+      continue;
+    }
+
+    if (recipient.status === 'delivered') {
+      successCount += 1;
+      deliveredCount += 1;
+      continue;
+    }
+
+    if (recipient.status === 'sent') {
+      successCount += 1;
+      continue;
+    }
+
+    if (recipient.status === 'failed') {
+      failedCount += 1;
+      continue;
+    }
+
+    queuedCount += 1;
+  }
+
+  return {
+    total: recipients.length || campaign.totalRecipients || 0,
+    successCount,
+    deliveredCount,
+    readCount,
+    failedCount,
+    queuedCount,
+    optInCount,
+  };
+}
+
 function upsertCampaign(items: Campaign[], incoming: Campaign) {
   return [...items.filter((item) => item.id !== incoming.id), incoming]
     .sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime());
@@ -230,7 +375,7 @@ function buildDeliveryGroups(campaign: Campaign) {
       continue;
     }
 
-    if (recipient.status === 'delivered') {
+    if (CAMPAIGN_SUCCESS_STATUSES.has(recipient.status)) {
       groups.delivered.push(recipient);
       continue;
     }
@@ -242,32 +387,32 @@ function buildDeliveryGroups(campaign: Campaign) {
 }
 
 function getCampaignDeliveryLabel(campaign: Campaign) {
-  const groups = buildDeliveryGroups(campaign);
-  const total = campaign.recipients?.length || campaign.totalRecipients;
+  const summary = getCampaignStatusSummary(campaign);
 
-  if (total > 0 && groups.seen.length === total) return `Seen by ${total}`;
-  if (groups.seen.length > 0) return `Seen ${groups.seen.length}/${total}`;
-  if (groups.delivered.length > 0) return `Delivered ${groups.delivered.length}/${total}`;
-  if (groups.underOptation.length > 0) return `Under optation ${groups.underOptation.length}`;
-  if (campaign.failedCount > 0) return `${campaign.failedCount} failed`;
+  if (summary.total > 0 && summary.readCount === summary.total) return `Seen by ${summary.total}`;
+  if (summary.readCount > 0) return `Seen ${summary.readCount}/${summary.total}`;
+  if (summary.deliveredCount > 0) return `Delivered ${summary.deliveredCount}/${summary.total}`;
+  if (summary.successCount > 0) return `Sent ${summary.successCount}/${summary.total}`;
+  if (summary.optInCount > 0) return `Under optation ${summary.optInCount}`;
+  if (summary.failedCount > 0) return `${summary.failedCount} failed`;
   if (campaign.status === 'sending') return `Sending ${campaign.sentCount}/${campaign.totalRecipients}`;
   if (campaign.status === 'completed') return `Sent to ${campaign.sentCount}/${campaign.totalRecipients}`;
   return `Queued for ${campaign.totalRecipients}`;
 }
 
 function getCampaignCheckState(campaign: Campaign) {
-  const recipients = campaign.recipients || [];
-  if (recipients.length === 0) {
+  const summary = getCampaignStatusSummary(campaign);
+  if (summary.total === 0) {
     if (campaign.status === 'completed') return 'sent';
     if (campaign.failedCount > 0) return 'failed';
     return 'queued';
   }
 
-  if (recipients.some((recipient) => recipient.status === 'failed')) return 'failed';
-  if (recipients.some((recipient) => OPT_IN_WAITING_STATUSES.has(recipient.status) || recipient.status === 'queued')) return 'queued';
-  if (recipients.every((recipient) => recipient.status === 'read')) return 'read';
-  if (recipients.every((recipient) => recipient.status === 'read' || recipient.status === 'delivered')) return 'delivered';
-  if (recipients.every((recipient) => ['sent', 'delivered', 'read'].includes(recipient.status))) return 'sent';
+  if (summary.readCount === summary.total) return 'read';
+  if (summary.deliveredCount === summary.total) return 'delivered';
+  if (summary.successCount > 0) return 'sent';
+  if (summary.optInCount > 0 || summary.queuedCount > 0) return 'queued';
+  if (summary.failedCount > 0) return 'failed';
   return 'queued';
 }
 
@@ -276,14 +421,18 @@ function isCampaignAfterListClear(campaign: Campaign, contactList: ContactList |
   return new Date(campaign.createdAt).getTime() > new Date(contactList.clearedAt).getTime();
 }
 
-function renderCampaignStatus(campaign: Campaign) {
-  const state = getCampaignCheckState(campaign);
-
-  if (state === 'read') return <CheckCheck size={15} className="bubble__status bubble__status--read" />;
-  if (state === 'delivered') return <CheckCheck size={15} className="bubble__status" />;
-  if (state === 'sent') return <Check size={15} className="bubble__status" />;
-  if (state === 'failed') return <AlertCircle size={15} className="bubble__status bubble__status--failed" />;
-  return <Clock3 size={15} className="bubble__status bubble__status--queued" />;
+function renderCampaignInfoButton(campaign: Campaign, onOpen: (campaign: Campaign) => void) {
+  return (
+    <button
+      type="button"
+      className="broadcast-info-trigger"
+      onClick={() => void onOpen(campaign)}
+      title="Message info"
+      aria-label="Message info"
+    >
+      <Info size={14} />
+    </button>
+  );
 }
 
 function renderBroadcastPayload(payload: {
@@ -418,6 +567,7 @@ function DeliveryGroupsSkeleton() {
 
 export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast, onContactListUpdated }: Props) {
   const [draft, setDraft] = useState('');
+  const [draftSelection, setDraftSelection] = useState({ start: 0, end: 0 });
   const [file, setFile] = useState<File | null>(null);
   const [composerPreviewUrl, setComposerPreviewUrl] = useState<string | null>(null);
   const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
@@ -463,6 +613,23 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
   const voiceChunksRef = useRef<Blob[]>([]);
   const voiceStartedAtRef = useRef(0);
   const voiceAccumulatedMsRef = useRef(0);
+
+  function closeMembersSheet() {
+    const activeElement = document.activeElement;
+    if (activeElement instanceof HTMLElement) {
+      activeElement.blur();
+    }
+
+    setEditingName(false);
+    setListNameDraft(contactList?.name || '');
+    setMembersOpen(false);
+
+    window.requestAnimationFrame(() => {
+      window.scrollTo(0, 0);
+      document.documentElement.scrollTop = 0;
+      document.body.scrollTop = 0;
+    });
+  }
 
   const recipientCount = contactList ? getRecipientCount(contactList) : 0;
   const hasMemberDetails = contactList ? hasCompleteMemberDetails(contactList) : false;
@@ -524,6 +691,14 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
       .filter((item) => getBroadcastSearchText(item.type === 'campaign' ? item.campaign : item.item).includes(query))
       .map((item) => item.key);
   }, [searchQuery, timeline]);
+  const composerLineContext = useMemo(
+    () => getComposerLineContext(draft, draftSelection.start, draftSelection.end),
+    [draft, draftSelection.end, draftSelection.start],
+  );
+  const broadcastAutocompleteSuggestions = useMemo(
+    () => getBroadcastAutocompleteSuggestions(composerLineContext.query),
+    [composerLineContext.query],
+  );
 
   const visibleContacts = useMemo(() => {
     const query = memberSearch.trim().toLowerCase();
@@ -754,6 +929,8 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
   }, [allContacts.length, contactList, membersOpen, onContactListUpdated]);
 
   async function openInfoDrawer(campaign: Campaign) {
+    if (infoLoading && infoCampaign?.id === campaign.id) return;
+
     setInfoCampaign(campaign);
     setInfoError('');
     setInfoLoading(true);
@@ -773,7 +950,38 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
 
   function handleEmojiClick(emojiData: EmojiClickData) {
     setDraft((current) => `${current}${emojiData.emoji}`);
-    textareaRef.current?.focus();
+    if (shouldAutoFocusComposer()) {
+      textareaRef.current?.focus();
+    }
+  }
+
+  function syncDraftSelection(target: HTMLTextAreaElement | null) {
+    if (!target) return;
+    setDraftSelection({
+      start: target.selectionStart ?? target.value.length,
+      end: target.selectionEnd ?? target.value.length,
+    });
+  }
+
+  function applyAutocompleteSnippet(value: string, options?: { nextDraft?: string; start?: number; end?: number }) {
+    const baseDraft = options?.nextDraft ?? draft;
+    const selectionStart = options?.start ?? textareaRef.current?.selectionStart ?? draftSelection.start ?? baseDraft.length;
+    const selectionEnd = options?.end ?? textareaRef.current?.selectionEnd ?? draftSelection.end ?? selectionStart;
+    const context = getComposerLineContext(baseDraft, selectionStart, selectionEnd);
+    const replacement = `${context.leadingWhitespace}${value}`;
+    const nextDraft = `${baseDraft.slice(0, context.lineStart)}${replacement}${baseDraft.slice(context.lineEnd)}`;
+    const caretPosition = context.lineStart + replacement.length;
+
+    setDraft(nextDraft);
+    setDraftSelection({ start: caretPosition, end: caretPosition });
+
+    window.requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.setSelectionRange(caretPosition, caretPosition);
+      resizeComposerTextarea(textarea);
+    });
   }
 
   function clearVoiceTimer() {
@@ -977,7 +1185,7 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
         selectedContactIds.map((contactId) => ({ contactId })),
       );
       onContactListUpdated(updatedList);
-      setMembersOpen(false);
+      closeMembersSheet();
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : 'Failed to update broadcast members');
     } finally {
@@ -1216,16 +1424,8 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
                   </div>
                   <div className="bubble__meta bubble__meta--broadcast">
                     <span>{getCampaignDeliveryLabel(item.campaign)}</span>
-                    <button
-                      type="button"
-                      className="broadcast-info-trigger"
-                      onClick={() => void openInfoDrawer(item.campaign)}
-                      title="Message info"
-                    >
-                      <Info size={14} />
-                    </button>
                     <span>{formatBubbleTime(item.campaign.createdAt)}</span>
-                    {renderCampaignStatus(item.campaign)}
+                    {renderCampaignInfoButton(item.campaign, openInfoDrawer)}
                   </div>
                 </div>
               </div>
@@ -1331,6 +1531,22 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
           </div>
         )}
 
+        {broadcastAutocompleteSuggestions.length > 0 && (
+          <div className="composer__autocomplete-strip" aria-label="Broadcast autocomplete suggestions">
+            {broadcastAutocompleteSuggestions.map((snippet, index) => (
+              <button
+                key={snippet.label}
+                type="button"
+                className={`composer__autocomplete-pill ${index === 0 ? 'is-primary' : ''}`}
+                onClick={() => applyAutocompleteSnippet(snippet.value)}
+                title={snippet.value.trim()}
+              >
+                {snippet.label}
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="composer broadcast-composer">
           <div ref={emojiRef} className="composer__emoji-anchor">
             <button
@@ -1339,7 +1555,9 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
               title="Emoji"
               onClick={() => {
                 setEmojiPickerOpen((current) => !current);
-                textareaRef.current?.focus();
+                if (shouldAutoFocusComposer()) {
+                  textareaRef.current?.focus();
+                }
               }}
             >
               <Smile size={19} />
@@ -1381,8 +1599,38 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
             rows={1}
             value={draft}
             placeholder={file ? 'Add caption' : 'Type a broadcast message'}
-            onChange={(event) => setDraft(event.target.value)}
+            onChange={(event) => {
+              const nextDraft = event.target.value;
+              const nextStart = event.target.selectionStart ?? nextDraft.length;
+              const nextEnd = event.target.selectionEnd ?? nextDraft.length;
+              const inputType = (event.nativeEvent as InputEvent | undefined)?.inputType || '';
+              const nextContext = getComposerLineContext(nextDraft, nextStart, nextEnd);
+              const nextSuggestions = getBroadcastAutocompleteSuggestions(nextContext.query);
+              const shouldAutoComplete = inputType.startsWith('insert')
+                && nextContext.query.length >= 2
+                && nextSuggestions.length === 1;
+
+              if (shouldAutoComplete) {
+                applyAutocompleteSnippet(nextSuggestions[0].value, {
+                  nextDraft,
+                  start: nextStart,
+                  end: nextEnd,
+                });
+                return;
+              }
+
+              setDraft(nextDraft);
+              setDraftSelection({ start: nextStart, end: nextEnd });
+            }}
+            onClick={(event) => syncDraftSelection(event.currentTarget)}
+            onKeyUp={(event) => syncDraftSelection(event.currentTarget)}
+            onSelect={(event) => syncDraftSelection(event.currentTarget)}
             onKeyDown={(event) => {
+              if (event.key === 'Tab' && broadcastAutocompleteSuggestions.length > 0) {
+                event.preventDefault();
+                applyAutocompleteSnippet(broadcastAutocompleteSuggestions[0].value);
+                return;
+              }
               if (event.key === 'Enter' && !event.shiftKey && shouldSubmitOnEnter()) {
                 event.preventDefault();
                 void handleSubmit();
@@ -1443,7 +1691,6 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
                   </div>
                   <div className="bubble__meta bubble__meta--broadcast">
                     <span>{formatBubbleTime(infoCampaign.createdAt)}</span>
-                    {renderCampaignStatus(infoCampaign)}
                   </div>
                 </div>
               </div>
@@ -1475,6 +1722,11 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
                               <div className="recipient-avatar recipient-avatar--compact">{getRecipientName(recipient).slice(0, 1).toUpperCase()}</div>
                               <div className="delivery-recipient-row__copy">
                                 <strong>{getRecipientName(recipient)}</strong>
+                                {group === 'notDelivered' && recipient.status === 'failed' && (
+                                  <span className="delivery-recipient-row__reason">
+                                    {getRecipientFailureReason(recipient)}
+                                  </span>
+                                )}
                               </div>
                               <small>
                                 {recipient.readAt
@@ -1508,7 +1760,7 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
       </div>
 
       <div className={`bottom-sheet ${membersOpen ? 'is-open' : ''}`} aria-hidden={!membersOpen}>
-        <div className="bottom-sheet__backdrop" onClick={() => setMembersOpen(false)} />
+        <div className="bottom-sheet__backdrop" onClick={closeMembersSheet} />
         <section className="bottom-sheet__panel bottom-sheet__panel--wide frosted-panel" role="dialog" aria-modal="true">
           <header className="bottom-sheet__header">
             <div>
@@ -1542,7 +1794,7 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
               )}
               <p>{hasMemberDetails ? `${optedInMembers.length} opted in, ${notOptedInMembers.length} not opted in` : 'Loading participants'}</p>
             </div>
-            <button type="button" className="toolbar-icon-button" onClick={() => setMembersOpen(false)} title="Close">
+            <button type="button" className="toolbar-icon-button" onClick={closeMembersSheet} title="Close">
               <X size={18} />
             </button>
           </header>
@@ -1641,7 +1893,7 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
           </div>
 
           <footer className="bottom-sheet__footer">
-            <button type="button" className="ghost-button" onClick={() => setMembersOpen(false)}>
+            <button type="button" className="ghost-button" onClick={closeMembersSheet}>
               Cancel
             </button>
             <button type="button" className="primary-button" onClick={() => void handleSaveMembers()} disabled={savingMembers}>
