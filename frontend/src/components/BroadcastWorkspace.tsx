@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   Bell,
   BellOff,
+  Check,
   CheckCheck,
   ChevronDown,
   ChevronUp,
