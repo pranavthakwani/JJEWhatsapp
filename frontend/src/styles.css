@@ -760,9 +760,12 @@ body {
 
 .sidebar__filters {
   display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
   gap: 8px;
   padding: 9px 12px 8px;
   overflow-x: auto;
+  overflow-y: hidden;
   overscroll-behavior-x: contain;
   scrollbar-width: none;
 }
@@ -813,6 +816,7 @@ body {
   flex: 1;
   min-height: 0;
   overflow: auto;
+  overflow-x: hidden;
   overscroll-behavior: contain;
 }
 
@@ -828,6 +832,7 @@ body {
   background: transparent;
   text-align: left;
   transition: background-color 120ms ease, transform 120ms ease;
+  min-width: 0;
 }
 
 .conversation-card:hover {
@@ -845,9 +850,12 @@ body {
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
+  min-width: 0;
 }
 
 .conversation-card__top strong {
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: 0.95rem;
   line-height: 1.22;
   font-weight: 500;
@@ -885,6 +893,9 @@ body {
 }
 
 .conversation-card__bottom span:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-shrink: 1;
   font-size: 0.86rem;
   line-height: 1.25;
   color: var(--app-text-muted);
