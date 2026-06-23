@@ -7,6 +7,9 @@ import { handleMetaWebhook } from '../services/webhookService.js';
 import { getAuthStatus, listDevices, logoutUser, requireAppAccess, updateDevice } from '../services/authService.js';
 import { buildMessagePreview, normaliseRecipientWaId } from '../utils/messageFormat.js';
 import { logger } from '../utils/logger.js';
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
 
 const recentRequestCache = new Map();
 
