@@ -26,7 +26,7 @@ import {
   Upload,
   X,
 } from 'lucide-react';
-import { Suspense, lazy, useEffect, useMemo, useRef, useState, type CSSProperties, type SyntheticEvent } from 'react';
+import { Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type SyntheticEvent } from 'react';
 import { cacheMessageMedia, getCachedMessageMedia, getMediaUrl } from '../lib/api';
 import type { Conversation, Message } from '../types';
 import type { EmojiClickData } from 'emoji-picker-react';
@@ -35,6 +35,7 @@ const EmojiPicker = lazy(() => import('emoji-picker-react'));
 const CUSTOMER_SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const COMPOSER_MAX_TEXTAREA_HEIGHT = 176;
 const OLDER_MESSAGES_AUTOLOAD_OFFSET_PX = 320;
+const JUMP_TO_LATEST_THRESHOLD_PX = 180;
 const VOICE_RECORDER_MIME_TYPES = [
   'audio/ogg;codecs=opus',
   'audio/webm;codecs=opus',
@@ -656,6 +657,7 @@ export function ChatWindow({
   const [reactionLibraryWaId, setReactionLibraryWaId] = useState<string | null>(null);
   const [composerPreviewUrl, setComposerPreviewUrl] = useState<string | null>(null);
   const [jumpHighlightId, setJumpHighlightId] = useState<number | null>(null);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [optInSendingKind, setOptInSendingKind] = useState<'intro' | 'followup' | null>(null);
   const [optInError, setOptInError] = useState('');
   const [actionMessage, setActionMessage] = useState<Message | null>(null);
@@ -932,7 +934,17 @@ export function ChatWindow({
     }, 1800);
   }
 
-  useEffect(() => {
+  function syncJumpToLatestVisibility(viewport: HTMLDivElement | null) {
+    if (!viewport) {
+      setShowJumpToLatest(false);
+      return;
+    }
+
+    const distanceFromBottom = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop;
+    setShowJumpToLatest(distanceFromBottom > JUMP_TO_LATEST_THRESHOLD_PX);
+  }
+
+  useLayoutEffect(() => {
     if (!messagesViewportRef.current) return;
 
     if (pendingOlderScrollRestoreRef.current) {
@@ -941,11 +953,18 @@ export function ChatWindow({
       viewport.scrollTop = viewport.scrollHeight - previous.scrollHeight + previous.scrollTop;
       pendingOlderScrollRestoreRef.current = null;
       olderLoadRequestRef.current = false;
+      syncJumpToLatestVisibility(viewport);
+      return;
+    }
+
+    if (loading && visibleMessages.length === 0) {
+      syncJumpToLatestVisibility(messagesViewportRef.current);
       return;
     }
 
     messagesViewportRef.current.scrollTop = messagesViewportRef.current.scrollHeight;
-  }, [conversation?.id, lastMessageId]);
+    syncJumpToLatestVisibility(messagesViewportRef.current);
+  }, [conversation?.id, lastMessageId, loading, visibleMessages.length]);
 
   useEffect(() => {
     if (!searchOpen) return;
@@ -1250,6 +1269,7 @@ export function ChatWindow({
       top: messagesViewportRef.current.scrollHeight,
       behavior: 'smooth',
     });
+    setShowJumpToLatest(false);
     setMenuOpen(false);
   }
 
@@ -1478,6 +1498,7 @@ export function ChatWindow({
 
   function handleMessagesScroll() {
     if (!messagesViewportRef.current) return;
+    syncJumpToLatestVisibility(messagesViewportRef.current);
     if (messagesViewportRef.current.scrollTop <= OLDER_MESSAGES_AUTOLOAD_OFFSET_PX) {
       requestOlderMessages();
     }
@@ -1519,22 +1540,24 @@ export function ChatWindow({
       )}
 
       <header className="chat-pane__header">
-        <button type="button" className="mobile-back-button" onClick={onBack} title="Back to chats">
-          <ArrowLeft size={22} />
-        </button>
-        <div className="chat-pane__contact">
-          <div className="chat-pane__avatar">
-            {conversation.contactName.slice(0, 1).toUpperCase()}
-          </div>
-          <div>
-            <strong>{conversation.contactName}</strong>
-            <div className="chat-pane__subtitle-row">
-              <div className="chat-pane__subtitle">{headerSubtitle}</div>
-              {muted && (
-                <span className="chat-pane__mute-indicator" title="Muted">
-                  <BellOff size={14} />
-                </span>
-              )}
+        <div className="chat-pane__header-main">
+          <button type="button" className="mobile-back-button" onClick={onBack} title="Back to chats">
+            <ArrowLeft size={22} />
+          </button>
+          <div className="chat-pane__contact">
+            <div className="chat-pane__avatar">
+              {conversation.contactName.slice(0, 1).toUpperCase()}
+            </div>
+            <div>
+              <strong>{conversation.contactName}</strong>
+              <div className="chat-pane__subtitle-row">
+                <div className="chat-pane__subtitle">{headerSubtitle}</div>
+                {muted && (
+                  <span className="chat-pane__mute-indicator" title="Muted">
+                    <BellOff size={14} />
+                  </span>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -1566,10 +1589,6 @@ export function ChatWindow({
                 <button type="button" onClick={handleToggleSearch}>
                   <Search size={16} />
                   <span>Search in chat</span>
-                </button>
-                <button type="button" onClick={handleJumpToLatest}>
-                  <ChevronDown size={16} />
-                  <span>Jump to latest</span>
                 </button>
               </div>
             )}
@@ -1815,6 +1834,17 @@ export function ChatWindow({
           )
         ))}
       </div>
+
+      {showJumpToLatest && (
+        <button
+          type="button"
+          className="chat-pane__jump-latest-button"
+          onClick={handleJumpToLatest}
+          title="Jump to latest"
+        >
+          <ChevronDown size={18} />
+        </button>
+      )}
 
       <footer className="chat-pane__composer-shell">
         {file && (
