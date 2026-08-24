@@ -18,6 +18,11 @@ import type {
   ContactSearchResult,
   Conversation,
   Message,
+  LeadOpsDashboard,
+  LeadOpsFacets,
+  LeadOpsItem,
+  LeadOpsPage,
+  AiWorkflowTest,
   PaginatedResult,
   StarredMessage,
   Template,
@@ -45,6 +50,17 @@ const api = axios.create({
 });
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4500/api';
+
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const code = error?.response?.data?.code;
+    if (typeof window !== 'undefined' && ['LOGIN_REQUIRED', 'DEVICE_NOT_APPROVED'].includes(code)) {
+      window.dispatchEvent(new CustomEvent('jjewa:auth-invalid'));
+    }
+    return Promise.reject(error);
+  },
+);
 const BOOTSTRAP_CACHE_TTL_MS = 5 * 60 * 1000;
 const CONVERSATION_CACHE_TTL_MS = 2 * 60 * 1000;
 const MESSAGE_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -197,6 +213,10 @@ export async function logout() {
   await api.post('/auth/logout');
 }
 
+export async function resetDevice() {
+  await api.post('/auth/device/reset');
+}
+
 export async function listAuthDevices() {
   const { data } = await api.get<{ devices: AuthDevice[] }>('/auth/devices');
   return data.devices;
@@ -281,6 +301,11 @@ export async function uploadMedia(phoneNumberId: number, file: File, onUploadPro
   return data;
 }
 
+export async function login(email: string, password: string, remember = false) {
+  const { data } = await api.post<AuthStatus>('/auth/login', { email, password, remember });
+  return data;
+}
+
 export async function searchContacts(query: string) {
   const { data } = await api.get<ContactSearchResult[]>('/contacts/search', {
     params: { q: query },
@@ -353,11 +378,6 @@ export async function getStarredMessages(phoneNumberId?: number | null) {
 
 export async function deleteMessage(messageId: number) {
   const { data } = await api.delete<{ message: Message; conversation: Conversation }>(`/messages/${messageId}`);
-  return data;
-}
-
-export async function importBusinessDirectoryContacts() {
-  const { data } = await api.post<{ workbookPath: string; importedCount: number; contacts: Contact[] }>('/contacts/import/business-directory');
   return data;
 }
 
@@ -505,4 +525,62 @@ export function getMediaUrl(messageId: number) {
 
 export function getCampaignMediaUrl(campaignId: number) {
   return `${apiBaseUrl}/campaigns/${campaignId}/media`;
+}
+
+export async function getAiStatus() {
+  const { data } = await api.get<{ enabled: boolean; configured: boolean; model: string | null }>('/ai/status');
+  return data;
+}
+
+export async function startAiWorkflowTest(text: string) {
+  const { data } = await api.post<AiWorkflowTest>('/ai/workflow-tests', { text });
+  return data;
+}
+
+export async function getAiWorkflowTest(testId: string) {
+  const { data } = await api.get<AiWorkflowTest>(`/ai/workflow-tests/${encodeURIComponent(testId)}`);
+  return data;
+}
+
+export async function getHealthStatus() {
+  const { data } = await api.get<{ ok: boolean; database: string }>('/health');
+  return data;
+}
+
+export async function getLeadOpsDashboard(days = 30) {
+  const { data } = await api.get<LeadOpsDashboard>('/leadops/dashboard', { params: { days } });
+  return data;
+}
+
+export async function getLeadOpsFacets(days = 30) {
+  const { data } = await api.get<LeadOpsFacets>('/leadops/facets', { params: { days } });
+  return data;
+}
+
+export async function getLeadOpsItems(params: {
+  type: 'leads' | 'offerings' | 'ignored';
+  days?: number;
+  brand?: string;
+  model?: string;
+  status?: string;
+  search?: string;
+  minPrice?: string | number;
+  maxPrice?: string | number;
+  minQuantity?: string | number;
+  page?: number;
+  limit?: number;
+}) {
+  const { data } = await api.get<LeadOpsPage>('/leadops/items', { params });
+  return data;
+}
+
+export async function getLeadMatches(leadId: number) {
+  const { data } = await api.get<LeadOpsItem[]>(`/leadops/leads/${leadId}/matches`);
+  return data;
+}
+
+export async function updateLeadOpsStatus(type: 'lead' | 'offering', id: number, status: string) {
+  const path = type === 'lead' ? `/leadops/leads/${id}` : `/leadops/offerings/${id}`;
+  const { data } = await api.patch<{ id: number; status: string; updatedAt: string }>(path, { status });
+  return data;
 }

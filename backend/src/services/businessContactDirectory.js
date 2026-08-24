@@ -1,16 +1,4 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import xlsx from 'xlsx';
-
-const SHEET_NAME = 'Sheet2';
-const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-const workbookCandidates = [
-  path.resolve(moduleDir, '../../../Phone Contacts Business.xlsx'),
-  path.resolve(process.cwd(), '../../Phone Contacts Business.xlsx'),
-  path.resolve(process.cwd(), '../Phone Contacts Business.xlsx'),
-  path.resolve(process.cwd(), 'Phone Contacts Business.xlsx'),
-];
 
 function normalizePhone(value) {
   if (value == null) return null;
@@ -24,9 +12,6 @@ function cleanName(value) {
   return normalized || null;
 }
 
-function resolveWorkbookPath() {
-  return workbookCandidates.find((candidate) => fs.existsSync(candidate)) || null;
-}
 
 function parseRows(rawRows = []) {
   const deduped = new Map();
@@ -61,25 +46,6 @@ function parseRows(rawRows = []) {
   }
 
   return [...deduped.values()];
-}
-
-export function parseBusinessDirectoryWorkbook() {
-  const workbookPath = resolveWorkbookPath();
-  if (!workbookPath) {
-    throw new Error(`Phone Contacts Business.xlsx not found. Checked: ${workbookCandidates.join(', ')}`);
-  }
-
-  const workbook = xlsx.readFile(workbookPath);
-  const worksheet = workbook.Sheets[SHEET_NAME];
-  if (!worksheet) {
-    throw new Error(`Sheet "${SHEET_NAME}" not found in ${workbookPath}`);
-  }
-
-  const rawRows = xlsx.utils.sheet_to_json(worksheet, { defval: null });
-  return {
-    workbookPath,
-    contacts: parseRows(rawRows),
-  };
 }
 
 export function parseUploadedWorkbook(buffer, options = {}) {

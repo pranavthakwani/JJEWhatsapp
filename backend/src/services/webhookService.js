@@ -1,6 +1,6 @@
-import * as repo from './chatRepository.js';
+import * as repo from '../repositories/chatRepository.js';
 import { sendMediaMessage, sendTextMessage } from './metaCloudService.js';
-import { buildMessagePreview, extractInboundMessageParts, toDateFromUnixSeconds } from '../utils/messageFormat.js';
+import { extractInboundMessageParts, toDateFromUnixSeconds } from '../utils/messageFormat.js';
 import { logger } from '../utils/logger.js';
 
 function mapStatus(status) {
@@ -142,57 +142,39 @@ export async function handleMetaWebhook(payload, io) {
       );
 
       for (const message of value.messages || []) {
-        const existingMessage = await repo.getMessageByWaMessageId(message.id);
-        if (existingMessage) {
-          logger.info('Duplicate inbound message ignored', {
-            waMessageId: message.id,
-            phoneNumberId,
-            contactWaId: message.from,
-          });
-          continue;
-        }
-
         const waId = message.from;
         const contactMeta = contactsByWaId.get(waId) || {};
-        const contact = await repo.upsertContact({
-          waId,
-          phoneNumber: waId,
-          profileName: contactMeta.profileName,
-          inboundAt: new Date(),
-        });
-
-        const conversationId = await repo.ensureConversation(number.id, contact.id);
         const parts = extractInboundMessageParts(message);
         const waTimestamp = toDateFromUnixSeconds(message.timestamp) || new Date();
 
-        const inserted = await repo.insertMessage({
-          conversationId,
-          phoneNumberId: number.id,
-          contactId: contact.id,
-          direction: 'inbound',
+        const stored = await repo.storeInboundMessage({
+          metaPhoneNumberId: phoneNumberId,
+          waId,
+          phoneNumber: waId,
+          profileName: contactMeta.profileName,
+          providerMessageId: message.id,
+          parentProviderMessageId: parts.parentWaMessageId,
           messageType: parts.messageType,
-          waMessageId: message.id,
-          parentWaMessageId: parts.parentWaMessageId,
           textBody: parts.textBody,
           caption: parts.caption,
           mediaId: parts.mediaId,
           mimeType: parts.mimeType,
           fileName: parts.fileName,
-          status: 'received',
-          waTimestamp,
+          providerTimestamp: waTimestamp,
         });
 
-        await repo.touchConversation({
-          conversationId,
-          messageId: inserted.id,
-          preview: buildMessagePreview({
-            textBody: inserted.textBody,
-            caption: inserted.caption,
-            messageType: inserted.messageType,
-          }),
-          timestamp: waTimestamp,
-          unreadIncrement: 1,
-        });
+        if (!stored.wasInserted) {
+          logger.info('Duplicate inbound message ignored', {
+            waMessageId: message.id,
+            phoneNumberId,
+            contactWaId: waId,
+          });
+          continue;
+        }
+
+        const inserted = stored.message;
+        const contact = stored.contact;
+        const conversationId = inserted.conversationId;
 
         const conversation = await repo.getConversationById(conversationId);
         io.emit('conversation:updated', conversation);

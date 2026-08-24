@@ -1,4 +1,4 @@
-import * as repo from './chatRepository.js';
+import * as repo from '../repositories/chatRepository.js';
 import { sendMediaMessage, sendTemplateMessage, sendTextMessage } from './metaCloudService.js';
 import { logger } from '../utils/logger.js';
 

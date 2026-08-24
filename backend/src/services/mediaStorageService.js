@@ -1,7 +1,6 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { env } from '../config/env.js';
-import { getAdminClient } from '../config/db.js';
-
-const supabase = getAdminClient();
 
 const MIME_EXTENSIONS = {
   'audio/aac': 'aac',
@@ -25,10 +24,8 @@ const MIME_EXTENSIONS = {
   'video/3gpp': '3gp',
 };
 
-let bucketReadyPromise = null;
-
 export function getMediaStorageBucket() {
-  return env.media.bucket;
+  return 'local';
 }
 
 function safePathSegment(value, fallback = 'media') {
@@ -65,26 +62,14 @@ function buildStoragePath({ phoneNumberId, source, mediaId, fileName, mimeType }
   ].join('/');
 }
 
-async function ensureBucket() {
-  if (!bucketReadyPromise) {
-    bucketReadyPromise = (async () => {
-      const bucket = getMediaStorageBucket();
-      const existing = await supabase.storage.getBucket(bucket);
-
-      if (!existing.error && existing.data) return;
-
-      const created = await supabase.storage.createBucket(bucket, {
-        public: false,
-        fileSizeLimit: '64MB',
-      });
-
-      if (created.error && !/already exists/i.test(created.error.message || '')) {
-        throw created.error;
-      }
-    })();
+function resolveStorageFile(storagePath) {
+  const normalizedRelativePath = String(storagePath || '').replaceAll('\\', '/');
+  const resolved = path.resolve(env.media.root, normalizedRelativePath);
+  const rootPrefix = `${path.resolve(env.media.root)}${path.sep}`;
+  if (!resolved.startsWith(rootPrefix)) {
+    throw new Error('Invalid media storage path.');
   }
-
-  return bucketReadyPromise;
+  return resolved;
 }
 
 export async function storeMediaBuffer({
@@ -95,9 +80,11 @@ export async function storeMediaBuffer({
   mimeType = 'application/octet-stream',
   fileName,
 }) {
-  await ensureBucket();
-
   const normalizedBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+  if (normalizedBuffer.length > env.media.maxBytes) {
+    throw new Error(`Media exceeds the ${env.media.maxBytes} byte storage limit.`);
+  }
+
   const storageBucket = getMediaStorageBucket();
   const storagePath = buildStoragePath({
     phoneNumberId,
@@ -106,16 +93,13 @@ export async function storeMediaBuffer({
     fileName,
     mimeType,
   });
+  const destination = resolveStorageFile(storagePath);
+  await fs.mkdir(path.dirname(destination), { recursive: true });
 
-  const uploaded = await supabase.storage
-    .from(storageBucket)
-    .upload(storagePath, normalizedBuffer, {
-      contentType: mimeType,
-      upsert: true,
-    });
-
-  if (uploaded.error) {
-    throw uploaded.error;
+  try {
+    await fs.writeFile(destination, normalizedBuffer, { flag: 'wx' });
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
   }
 
   return {
@@ -128,20 +112,21 @@ export async function storeMediaBuffer({
 }
 
 export async function downloadStoredMedia({ storageBucket, storagePath }) {
-  const bucket = storageBucket || getMediaStorageBucket();
-  const downloaded = await supabase.storage
-    .from(bucket)
-    .download(storagePath);
-
-  if (downloaded.error) {
-    throw downloaded.error;
+  if (storageBucket && storageBucket !== getMediaStorageBucket()) {
+    throw new Error(`Unsupported media storage provider: ${storageBucket}`);
+  }
+  const storageFile = resolveStorageFile(storagePath);
+  const [buffer, metadata] = await Promise.all([
+    fs.readFile(storageFile),
+    fs.stat(storageFile),
+  ]);
+  if (metadata.size > env.media.maxBytes) {
+    throw new Error('Stored media exceeds the configured download limit.');
   }
 
-  const arrayBuffer = await downloaded.data.arrayBuffer();
-
   return {
-    buffer: Buffer.from(arrayBuffer),
-    mimeType: downloaded.data.type || 'application/octet-stream',
-    fileName: String(storagePath || '').split('/').pop() || 'media',
+    buffer,
+    mimeType: 'application/octet-stream',
+    fileName: path.basename(storageFile),
   };
 }

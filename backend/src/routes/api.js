@@ -1,12 +1,17 @@
 import express from 'express';
-import * as repo from '../services/chatRepository.js';
+import * as repo from '../repositories/chatRepository.js';
 import { downloadMediaContent, getBusinessProfile, getMediaDownloadStream, listMessageTemplates, markMessageAsRead, sendMediaMessage, sendReactionMessage, sendTemplateMessage, sendTextMessage, uploadMedia } from '../services/metaCloudService.js';
 import { downloadStoredMedia, storeMediaBuffer } from '../services/mediaStorageService.js';
-import { parseBusinessDirectoryWorkbook, parseUploadedWorkbook } from '../services/businessContactDirectory.js';
+import { parseUploadedWorkbook } from '../services/businessContactDirectory.js';
 import { handleMetaWebhook } from '../services/webhookService.js';
-import { getAuthStatus, listDevices, logoutUser, requireAppAccess, updateDevice } from '../services/authService.js';
+import { getAuthStatus, listDevices, loginUser, logoutUser, requireAppAccess, resetCurrentDevice, updateDevice } from '../services/authService.js';
 import { buildMessagePreview, normaliseRecipientWaId } from '../utils/messageFormat.js';
 import { logger } from '../utils/logger.js';
+import { verifyMetaSignature } from '../security/metaSignature.js';
+import { checkDatabase } from '../config/db.js';
+import { env } from '../config/env.js';
+import { isAiExtractionEnabled } from '../repositories/jobRepository.js';
+import { getAiWorkflowTestStatus, startAiWorkflowTest } from '../services/aiWorkflowTestService.js';
 
 const recentRequestCache = new Map();
 
@@ -157,7 +162,7 @@ function sendMediaResponse(res, media, fileName) {
   res.setHeader('Content-Type', media.mimeType || 'application/octet-stream');
   res.setHeader('Content-Length', String(buffer.length));
   res.setHeader('Content-Disposition', `inline; filename="${sanitizeDownloadFileName(fileName || media.fileName)}"`);
-  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.setHeader('Cache-Control', 'private, max-age=86400');
   res.send(buffer);
 }
 
@@ -201,10 +206,11 @@ async function persistDownloadedCampaignMedia(campaign, media) {
 
 async function attachBusinessProfilePictures(numbers) {
   return Promise.all(numbers.map(async (number) => {
+    const publicNumber = repo.toPublicBusinessNumber(number);
     try {
       const profile = await getBusinessProfile(number);
       return {
-        ...number,
+        ...publicNumber,
         profilePictureUrl: profile?.profile_picture_url || null,
       };
     } catch (error) {
@@ -213,7 +219,7 @@ async function attachBusinessProfilePictures(numbers) {
         message: error?.message,
       });
       return {
-        ...number,
+        ...publicNumber,
         profilePictureUrl: null,
       };
     }
@@ -223,8 +229,24 @@ async function attachBusinessProfilePictures(numbers) {
 export function createApiRouter(io) {
   const router = express.Router();
 
+  for (const parameter of ['conversationId', 'messageId', 'contactId', 'listId', 'campaignId', 'deviceId', 'phoneNumberId', 'leadId', 'offeringId']) {
+    router.param(parameter, (req, res, next, value) => {
+      const id = Number(value);
+      if (!Number.isSafeInteger(id) || id <= 0) {
+        res.status(400).json({ error: `Invalid ${parameter}.`, code: 'INVALID_ROUTE_PARAMETER' });
+        return;
+      }
+      next();
+    });
+  }
+
   router.get('/health', async (_req, res) => {
-    res.json({ ok: true });
+    try {
+      await checkDatabase();
+      res.json({ ok: true, database: 'ready' });
+    } catch {
+      res.status(503).json({ ok: false, database: 'unavailable' });
+    }
   });
 
   router.get('/auth/status', async (req, res, next) => {
@@ -245,14 +267,26 @@ export function createApiRouter(io) {
 
   router.post('/auth/login', async (req, res, next) => {
     try {
-      res.status(410).json({ error: 'Login/register is disabled. Device approval is used for access.', code: 'DEVICE_ONLY_ACCESS' });
+      res.json(await loginUser(req, res));
     } catch (error) {
       next(error);
     }
   });
 
-  router.post('/auth/logout', async (req, res) => {
-    res.json(logoutUser(req, res));
+  router.post('/auth/logout', async (req, res, next) => {
+    try {
+      res.json(await logoutUser(req, res));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/auth/device/reset', async (req, res, next) => {
+    try {
+      res.json(await resetCurrentDevice(req, res));
+    } catch (error) {
+      next(error);
+    }
   });
 
   router.get('/auth/devices', async (req, res, next) => {
@@ -282,12 +316,106 @@ export function createApiRouter(io) {
     requireAppAccess(req, res, next);
   });
 
+  router.get('/ai/status', async (_req, res, next) => {
+    try {
+      res.json({
+        enabled: await isAiExtractionEnabled(),
+        configured: Boolean(env.ai.apiKey && env.ai.model),
+        model: env.ai.model || null,
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/ai/workflow-tests', async (req, res, next) => {
+    try {
+      res.status(202).json(await startAiWorkflowTest({ text: req.body?.text, io }));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/ai/workflow-tests/:testId', async (req, res, next) => {
+    try {
+      const testId = String(req.params.testId || '');
+      if (!/^workflow-test-[0-9a-f-]{36}$/i.test(testId)) {
+        res.status(400).json({ error: 'Invalid workflow test identifier.', code: 'INVALID_WORKFLOW_TEST_ID' });
+        return;
+      }
+      const status = await getAiWorkflowTestStatus(testId);
+      if (!status) {
+        res.status(404).json({ error: 'Workflow test was not found.', code: 'WORKFLOW_TEST_NOT_FOUND' });
+        return;
+      }
+      res.json(status);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/leadops/dashboard', async (req, res, next) => {
+    try {
+      res.json(await repo.getLeadOpsDashboard(req.query.days));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/leadops/facets', async (req, res, next) => {
+    try {
+      res.json(await repo.getLeadOpsFacets(req.query.days));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/leadops/items', async (req, res, next) => {
+    try {
+      res.json(await repo.listLeadOpsItems({
+        type: req.query.type?.toString(), days: req.query.days, brand: req.query.brand,
+        model: req.query.model, status: req.query.status, search: req.query.search,
+        minPrice: req.query.minPrice, maxPrice: req.query.maxPrice, minQuantity: req.query.minQuantity,
+        page: req.query.page, limit: req.query.limit,
+      }));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/leadops/leads/:leadId/matches', async (req, res, next) => {
+    try {
+      res.json(await repo.getLeadMatches(Number(req.params.leadId), req.query.limit));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.patch('/leadops/leads/:leadId', async (req, res, next) => {
+    try {
+      res.json(await repo.updateLeadStatus(Number(req.params.leadId), String(req.body?.status || '')));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.patch('/leadops/offerings/:offeringId', async (req, res, next) => {
+    try {
+      res.json(await repo.updateOfferingStatus(Number(req.params.offeringId), String(req.body?.status || '')));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.get('/bootstrap', async (_req, res, next) => {
     try {
-      const payload = await repo.getBootstrapData();
+      const [payload, internalNumbers] = await Promise.all([
+        repo.getBootstrapData(),
+        repo.listBusinessNumbers(),
+      ]);
       res.json({
         ...payload,
-        businessNumbers: await attachBusinessProfilePictures(payload.businessNumbers),
+        businessNumbers: await attachBusinessProfilePictures(internalNumbers),
       });
     } catch (error) {
       next(error);
@@ -796,24 +924,6 @@ export function createApiRouter(io) {
     }
   });
 
-  router.post('/contacts/import/business-directory', async (_req, res, next) => {
-    try {
-      const { workbookPath, contacts } = parseBusinessDirectoryWorkbook();
-      const imported = await repo.bulkUpsertContacts(contacts.map((contact) => ({
-        ...contact,
-        businessDirectoryName: contact.profileName,
-      })));
-
-      res.json({
-        workbookPath,
-        importedCount: imported.length,
-        contacts: imported,
-      });
-    } catch (error) {
-      next(error);
-    }
-  });
-
   router.post('/contacts/parse-spreadsheet', express.raw({ type: '*/*', limit: '16mb' }), async (req, res, next) => {
     try {
       const sheetName = req.headers['x-sheet-name']?.toString() || null;
@@ -1064,7 +1174,7 @@ export function createApiRouter(io) {
 
       res.setHeader('Content-Type', media.mimeType || message.mimeType || 'application/octet-stream');
       res.setHeader('Content-Disposition', `inline; filename="${sanitizeDownloadFileName(message.fileName || message.mediaId)}"`);
-      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.setHeader('Cache-Control', 'private, max-age=86400');
       if (media.contentLength) {
         res.setHeader('Content-Length', String(media.contentLength));
       }
@@ -1227,6 +1337,19 @@ export function createApiRouter(io) {
     try {
       const body = req.body || {};
       const mode = body.mode || 'text';
+      const phoneNumberId = Number(body.phoneNumberId);
+      if (!Number.isSafeInteger(phoneNumberId) || phoneNumberId <= 0) {
+        res.status(400).json({ error: 'A valid phoneNumberId is required' });
+        return;
+      }
+      if (!['text', 'template', 'image', 'video', 'audio', 'document'].includes(mode)) {
+        res.status(400).json({ error: 'Unsupported campaign mode' });
+        return;
+      }
+      if (!(await repo.getBusinessNumberById(phoneNumberId))) {
+        res.status(404).json({ error: 'Business number not found' });
+        return;
+      }
       let recipients = Array.isArray(body.recipients)
         ? body.recipients
             .map((recipient) => ({
@@ -1278,7 +1401,7 @@ export function createApiRouter(io) {
 
       const needsOptInTemplates = mode === 'text' || isBroadcastMediaMode(mode);
       const textBroadcastTemplates = needsOptInTemplates
-        ? await resolveTextBroadcastTemplates(Number(body.phoneNumberId), body)
+        ? await resolveTextBroadcastTemplates(phoneNumberId, body)
         : {
             initialTemplateName: body.initialTemplateName || null,
             followupTemplateName: body.followupTemplateName || null,
@@ -1296,7 +1419,7 @@ export function createApiRouter(io) {
       const detail = await withRecentRequestDedup(
         'campaign-create',
         {
-          phoneNumberId: Number(body.phoneNumberId),
+          phoneNumberId,
           contactListId,
           title: resolvedTitle,
           mode,
@@ -1316,7 +1439,7 @@ export function createApiRouter(io) {
         },
         async () => {
           const duplicateCampaign = await repo.findRecentDuplicateCampaign({
-            phoneNumberId: Number(body.phoneNumberId),
+            phoneNumberId,
             contactListId,
             title: resolvedTitle,
             mode,
@@ -1332,7 +1455,7 @@ export function createApiRouter(io) {
           }
 
           const campaign = await repo.createCampaign({
-            phoneNumberId: Number(body.phoneNumberId),
+            phoneNumberId,
             contactListId,
             title: resolvedTitle,
             mode,
@@ -1366,7 +1489,7 @@ export function createApiRouter(io) {
       const challenge = req.query['hub.challenge'];
       const number = token ? await repo.getBusinessNumberByVerifyToken(String(token)) : null;
 
-      if (mode === 'subscribe' && number && token === number.verifyToken) {
+      if (mode === 'subscribe' && number) {
         res.status(200).send(challenge);
         return;
       }
@@ -1379,6 +1502,10 @@ export function createApiRouter(io) {
 
   router.post('/webhooks/meta', async (req, res, next) => {
     try {
+      if (!verifyMetaSignature(req)) {
+        res.status(401).json({ error: 'Invalid Meta webhook signature.' });
+        return;
+      }
       const result = await handleMetaWebhook(req.body, io);
       res.json({ ok: true, ...result });
     } catch (error) {

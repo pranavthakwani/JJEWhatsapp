@@ -24,7 +24,7 @@ import {
   X,
 } from 'lucide-react';
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
-import type { EmojiClickData } from 'emoji-picker-react';
+import type { EmojiClickData, EmojiStyle, Theme } from 'emoji-picker-react';
 import {
   getCachedContactDirectory,
   getCachedContactListCampaigns,
@@ -220,7 +220,7 @@ function getRecipientCount(contactList: ContactList) {
   return contactList.memberCount ?? contactList.members?.length ?? 0;
 }
 
-function hasCompleteMemberDetails(contactList: ContactList) {
+function hasCompleteMemberDetails(contactList: ContactList): contactList is ContactList & { members: NonNullable<ContactList['members']> } {
   return Array.isArray(contactList.members) && contactList.members.length >= getRecipientCount(contactList);
 }
 
@@ -1570,8 +1570,8 @@ export function BroadcastWorkspace({ theme, contactList, onBack, onSendBroadcast
                   <EmojiPicker
                     open
                     onEmojiClick={handleEmojiClick}
-                    theme={theme}
-                    emojiStyle="native"
+                    theme={theme as Theme}
+                    emojiStyle={'native' as EmojiStyle}
                     lazyLoadEmojis
                     width={320}
                     height={380}

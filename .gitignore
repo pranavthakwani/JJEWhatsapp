@@ -10,3 +10,7 @@ backend/node_modules/
 frontend/.env
 frontend/dist/
 frontend/node_modules/
+
+# Encrypted one-time legacy database snapshots (never commit customer data)
+/data/legacy-supabase-snapshot/
+/.pnpm-store/

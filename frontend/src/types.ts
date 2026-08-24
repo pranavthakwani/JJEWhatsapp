@@ -27,8 +27,15 @@ export type AuthDevice = {
 
 export type AuthStatus = {
   authenticated: boolean;
+  loginRequired: boolean;
+  deviceApprovalRequired: boolean;
   canUseApp: boolean;
-  user: null;
+  user: {
+    id: number;
+    displayName: string;
+    email: string;
+    roles: string[];
+  } | null;
   device: AuthDevice | null;
 };
 
@@ -211,4 +218,86 @@ export type ContactSearchResult = {
   waId: string;
   phoneNumber: string | null;
   profileName: string | null;
+};
+
+export type LeadOpsItemType = 'lead' | 'offering' | 'ignored';
+
+export type LeadOpsItem = {
+  id: number;
+  type: LeadOpsItemType;
+  analysisId: number;
+  messageId: number;
+  conversationId: number;
+  contactId: number;
+  contactName: string;
+  phoneNumber: string;
+  sourceText: string | null;
+  classification: string;
+  confidence: number | null;
+  brand: string | null;
+  model: string | null;
+  variant: string | null;
+  ramGb: number | null;
+  storageGb: number | null;
+  colors: string[];
+  quantityMin: number | null;
+  quantityMax: number | null;
+  priceMin: number | null;
+  priceMax: number | null;
+  condition: string | null;
+  gstIncluded: boolean | null;
+  dispatchLocation: string | null;
+  status: string;
+  createdAt: string;
+  matchScore?: number;
+};
+
+export type LeadOpsDashboard = {
+  days: number;
+  totals: {
+    leads: number;
+    offerings: number;
+    ignored: number;
+    openLeads: number;
+    pendingPrices: number;
+    analyzedContacts: number;
+    tokenInput: number;
+    tokenOutput: number;
+    queuedJobs: number;
+    failedJobs: number;
+  };
+  trend: Array<{ date: string; leads: number; offerings: number; ignored: number }>;
+};
+
+export type LeadOpsFacets = {
+  brands: Array<{ value: string; total: number }>;
+  models: Array<{ value: string; total: number }>;
+};
+
+export type LeadOpsPage = {
+  items: LeadOpsItem[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+};
+
+export type AiWorkflowTest = {
+  testId: string;
+  stage: 'received' | 'queued' | 'processing' | 'completed' | 'failed';
+  messageId: number;
+  conversationId: number;
+  contactName: string;
+  sourceText: string;
+  jobStatus: string | null;
+  attemptCount: number;
+  classification: string | null;
+  confidence: number | null;
+  model: string | null;
+  leadCount: number;
+  offeringCount: number;
+  items: Array<Record<string, unknown>>;
+  error: string | null;
+  createdAt: string | null;
+  completedAt: string | null;
 };

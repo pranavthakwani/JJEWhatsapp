@@ -29,7 +29,7 @@ import {
 import { Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type SyntheticEvent } from 'react';
 import { cacheMessageMedia, getCachedMessageMedia, getMediaUrl } from '../lib/api';
 import type { Conversation, Message } from '../types';
-import type { EmojiClickData } from 'emoji-picker-react';
+import type { EmojiClickData, EmojiStyle, Theme } from 'emoji-picker-react';
 
 const EmojiPicker = lazy(() => import('emoji-picker-react'));
 const CUSTOMER_SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -1157,7 +1157,7 @@ export function ChatWindow({
 
       if (response.body && typeof response.body.getReader === 'function') {
         const reader = response.body.getReader();
-        const chunks: Uint8Array[] = [];
+        const chunks: BlobPart[] = [];
         let received = 0;
 
         while (true) {
@@ -1165,7 +1165,9 @@ export function ChatWindow({
           if (done) break;
           if (!value) continue;
 
-          chunks.push(value);
+          const chunk = new Uint8Array(value.byteLength);
+          chunk.set(value);
+          chunks.push(chunk);
           received += value.byteLength;
 
           if (total > 0) {
@@ -1794,8 +1796,8 @@ export function ChatWindow({
                           <EmojiPicker
                             open
                             onEmojiClick={(emojiData) => handleReactionEmojiClick(item.message, emojiData)}
-                            theme={theme}
-                            emojiStyle="native"
+                            theme={theme as Theme}
+                            emojiStyle={'native' as EmojiStyle}
                             lazyLoadEmojis
                             width={320}
                             height={360}
@@ -1929,8 +1931,8 @@ export function ChatWindow({
                   <EmojiPicker
                     open
                     onEmojiClick={handleEmojiClick}
-                    theme={theme}
-                    emojiStyle="native"
+                    theme={theme as Theme}
+                    emojiStyle={'native' as EmojiStyle}
                     lazyLoadEmojis
                     width={320}
                     height={380}

@@ -1,12 +1,15 @@
 import { Check, Forward, Star, X } from 'lucide-react';
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { CampaignComposer } from './components/CampaignComposer';
 import { ChatWindow } from './components/ChatWindow';
 import { ConversationList } from './components/ConversationList';
 import { BroadcastWorkspace } from './components/BroadcastWorkspace';
-import { AuthLoadingScreen, PendingDeviceScreen } from './components/AuthScreens';
+import { AuthLoadingScreen, AuthUnavailableScreen, LoginScreen, PendingDeviceScreen } from './components/AuthScreens';
 import { AddContactDialog, StartChatDialog } from './components/ContactDialogs';
 import { DeviceManagerDialog } from './components/DeviceManagerDialog';
+import { CrmNavigation } from './components/CrmNavigation';
+import type { CrmWorkspace } from './components/CrmNavigation';
+import { WorkspaceLoading } from './components/WorkspaceLoading';
 import {
   cacheMessageMedia,
   cacheMessageSnapshot,
@@ -19,6 +22,7 @@ import {
   deleteConversation,
   deleteMessage,
   getBootstrap,
+  getAiStatus,
   getAuthStatus,
   getCachedBootstrap,
   getCachedConversations,
@@ -26,10 +30,12 @@ import {
   getContactList,
   getContactLists,
   getConversations,
+  getConversation,
   getMessages,
   getStarredMessages,
   listAuthDevices,
-  logout as logoutAuth,
+  login as loginAuth,
+  resetDevice as resetAuthDevice,
   markConversationRead,
   renameContact,
   sendConversationOptInTemplate,
@@ -42,6 +48,10 @@ import {
 } from './lib/api';
 import { socket } from './lib/socket';
 import type { AuthDevice, AuthStatus, BootstrapPayload, Campaign, Contact, ContactList, Conversation, Message, StarredMessage } from './types';
+
+const LazyLeadOpsWorkspace = lazy(() => import('./components/LeadOpsWorkspace').then((module) => ({ default: module.LeadOpsWorkspace })));
+const LazyContactsWorkspace = lazy(() => import('./components/ContactsWorkspace').then((module) => ({ default: module.ContactsWorkspace })));
+const LazySystemWorkspace = lazy(() => import('./components/SystemWorkspace').then((module) => ({ default: module.SystemWorkspace })));
 
 type BroadcastSendPayload = {
   bodyText: string;
@@ -224,6 +234,8 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState('');
   const [deviceManagerOpen, setDeviceManagerOpen] = useState(false);
+  const [activeWorkspace, setActiveWorkspace] = useState<CrmWorkspace>('whatsapp');
+  const [aiEnabled, setAiEnabled] = useState(false);
   const [devices, setDevices] = useState<AuthDevice[]>([]);
   const [devicesLoading, setDevicesLoading] = useState(false);
   const [devicesError, setDevicesError] = useState('');
@@ -262,6 +274,7 @@ export default function App() {
   const messageLoadRequestRef = useRef(0);
   const isChatOpen = Boolean(activeConversation || activeContactListId);
   const canUseApp = authStatus?.canUseApp === true;
+  const totalUnreadCount = useMemo(() => conversations.reduce((total, conversation) => total + conversation.unreadCount, 0), [conversations]);
 
   function clearUnreadLocally(conversationId: number) {
     setConversations((current) => current.map((conversation) => (
@@ -329,7 +342,8 @@ export default function App() {
         }
         return status;
       } catch (error) {
-        setAuthError(error instanceof Error ? error.message : 'Unable to check device status.');
+        const responseMessage = (error as { response?: { data?: { error?: string } } })?.response?.data?.error;
+        setAuthError(responseMessage || (error instanceof Error ? error.message : 'Unable to check device status.'));
         setAuthStatus(null);
         socket.disconnect();
         resetRuntimeState();
@@ -346,13 +360,27 @@ export default function App() {
 
   async function handleResetDevice() {
     try {
-      await logoutAuth();
+      await resetAuthDevice();
     } finally {
       socket.disconnect();
       resetRuntimeState();
       setAuthStatus(null);
       setDeviceManagerOpen(false);
       void refreshAuthStatus();
+    }
+  }
+
+  async function handleLogin(email: string, password: string, remember: boolean) {
+    setAuthLoading(true);
+    setAuthError('');
+    try {
+      const status = await loginAuth(email, password, remember);
+      setAuthStatus(status);
+    } catch (error) {
+      const message = (error as { response?: { data?: { error?: string } } })?.response?.data?.error;
+      setAuthError(message || (error instanceof Error ? error.message : 'Unable to sign in.'));
+    } finally {
+      setAuthLoading(false);
     }
   }
 
@@ -568,6 +596,12 @@ export default function App() {
   }, [isMobileLayout, activeConversation?.id, activeContactListId]);
 
   useEffect(() => {
+    const handleInvalidAuth = () => void refreshAuthStatus(false);
+    window.addEventListener('jjewa:auth-invalid', handleInvalidAuth);
+    return () => window.removeEventListener('jjewa:auth-invalid', handleInvalidAuth);
+  }, []);
+
+  useEffect(() => {
     if (canUseApp) {
       if (!socket.connected) socket.connect();
       return;
@@ -591,6 +625,28 @@ export default function App() {
     }
 
     void loadBootstrap();
+  }, [canUseApp]);
+
+  useEffect(() => {
+    if (!canUseApp) {
+      setAiEnabled(false);
+      setActiveWorkspace('whatsapp');
+      return;
+    }
+
+    let cancelled = false;
+    void getAiStatus()
+      .then((status) => {
+        if (cancelled) return;
+        setAiEnabled(status.enabled);
+        if (!status.enabled) setActiveWorkspace((current) => current === 'leadops' ? 'whatsapp' : current);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setAiEnabled(false);
+        setActiveWorkspace((current) => current === 'leadops' ? 'whatsapp' : current);
+      });
+    return () => { cancelled = true; };
   }, [canUseApp]);
 
   useEffect(() => {
@@ -1164,6 +1220,17 @@ export default function App() {
     setActiveContactList(null);
     setActiveConversation(conversation);
     setConversations((current) => upsertConversation(current, conversation));
+    setActiveWorkspace('whatsapp');
+  }
+
+  async function openConversationFromWorkspace(conversationId: number) {
+    const conversation = conversations.find((item) => item.id === conversationId) || await getConversation(conversationId);
+    resetMobileViewportShell();
+    setActiveContactListId(null);
+    setActiveContactList(null);
+    setActiveConversation(conversation);
+    setConversations((current) => upsertConversation(current, conversation));
+    setActiveWorkspace('whatsapp');
   }
 
   async function handleSendOptInTemplate(templateKind: 'auto' | 'intro' | 'followup') {
@@ -1278,11 +1345,24 @@ export default function App() {
   }
 
   if (!authStatus) {
+    if (authError) {
+      return (
+        <div className={`wa-page theme-${theme} ${themeTransitioning ? 'is-theme-transitioning' : ''}`}>
+          <AuthUnavailableScreen
+            loading={authLoading}
+            error={authError}
+            onRefresh={() => void refreshAuthStatus()}
+          />
+        </div>
+      );
+    }
     return (
       <div className={`wa-page theme-${theme} ${themeTransitioning ? 'is-theme-transitioning' : ''}`}>
         <PendingDeviceScreen
           authStatus={{
             authenticated: false,
+            loginRequired: false,
+            deviceApprovalRequired: false,
             canUseApp: false,
             user: null,
             device: null,
@@ -1292,6 +1372,14 @@ export default function App() {
           onRefresh={() => void refreshAuthStatus()}
           onResetDevice={() => void handleResetDevice()}
         />
+      </div>
+    );
+  }
+
+  if (authStatus.loginRequired) {
+    return (
+      <div className={`wa-page theme-${theme} ${themeTransitioning ? 'is-theme-transitioning' : ''}`}>
+        <LoginScreen loading={authLoading} error={authError} onLogin={handleLogin} />
       </div>
     );
   }
@@ -1312,7 +1400,17 @@ export default function App() {
 
   return (
     <div className={`wa-page theme-${theme} ${themeTransitioning ? 'is-theme-transitioning' : ''}`}>
-      <div className={`wa-app-shell ${isChatOpen ? 'wa-app-shell--chat-open' : 'wa-app-shell--list-open'}`}>
+      <div className={`crm-shell ${activeWorkspace !== 'whatsapp' ? 'crm-shell--business' : ''} ${isMobileLayout && isChatOpen && activeWorkspace === 'whatsapp' ? 'crm-shell--focused-chat' : ''}`}>
+        <CrmNavigation
+          active={activeWorkspace}
+          aiEnabled={aiEnabled}
+          theme={theme}
+          unreadCount={totalUnreadCount}
+          onNavigate={setActiveWorkspace}
+          onToggleTheme={toggleTheme}
+        />
+        <div className="crm-workspace">
+      {activeWorkspace === 'whatsapp' && <div className={`wa-app-shell ${isChatOpen ? 'wa-app-shell--chat-open' : 'wa-app-shell--list-open'}`}>
         <ConversationList
           theme={theme}
           numbers={numbers}
@@ -1348,6 +1446,8 @@ export default function App() {
           }}
           onOpenStarred={() => void openStarredMessages()}
           onOpenDevices={() => setDeviceManagerOpen(true)}
+          leadOpsEnabled={aiEnabled}
+          onOpenLeadOps={() => setActiveWorkspace('leadops')}
           onResetDevice={() => void handleResetDevice()}
           onRefresh={() => {
             void loadConversations(true);
@@ -1434,6 +1534,16 @@ export default function App() {
             />
           )}
         </main>
+      </div>}
+
+          {activeWorkspace !== 'whatsapp' && (
+            <Suspense fallback={<WorkspaceLoading />}>
+              {activeWorkspace === 'contacts' && <LazyContactsWorkspace onAddContact={() => setAddContactOpen(true)} onStartConversation={handleStartChat} />}
+              {activeWorkspace === 'leadops' && aiEnabled && <LazyLeadOpsWorkspace onOpenConversation={(conversationId) => void openConversationFromWorkspace(conversationId)} />}
+              {activeWorkspace === 'system' && <LazySystemWorkspace numbers={numbers} deviceApprovalRequired={authStatus.deviceApprovalRequired} />}
+            </Suspense>
+          )}
+        </div>
       </div>
 
       <CampaignComposer

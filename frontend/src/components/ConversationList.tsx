@@ -1,4 +1,4 @@
-import { BellOff, Check, ChevronDown, Eraser, LogOut, Megaphone, Menu, MessageCircleMore, MessageSquarePlus, Moon, Plus, RefreshCw, Search, ShieldCheck, Star, SunMedium, Trash2, UserPlus, X } from 'lucide-react';
+import { BellOff, Briefcase, Check, ChevronDown, Eraser, LogOut, Megaphone, Menu, MessageCircleMore, MessageSquarePlus, Moon, Plus, RefreshCw, Search, ShieldCheck, Star, SunMedium, Trash2, UserPlus, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent } from 'react';
 import { getChatFilterSettings, saveChatFilterSettings } from '../lib/api';
@@ -23,6 +23,8 @@ type Props = {
   onRefresh: () => void;
   onOpenStarred: () => void;
   onOpenDevices: () => void;
+  leadOpsEnabled: boolean;
+  onOpenLeadOps: () => void;
   onResetDevice: () => void;
   onComposeCampaign: () => void;
   onStartChat: () => void;
@@ -164,6 +166,8 @@ export function ConversationList({
   onRefresh,
   onOpenStarred,
   onOpenDevices,
+  leadOpsEnabled,
+  onOpenLeadOps,
   onResetDevice,
   onComposeCampaign,
   onStartChat,
@@ -670,6 +674,10 @@ export function ConversationList({
             )}
 
             <nav className="app-drawer__actions" aria-label="App actions">
+              {leadOpsEnabled && <button type="button" onClick={() => runDrawerAction(onOpenLeadOps)}>
+                <Briefcase size={21} />
+                <span>Lead operations</span>
+              </button>}
               <button type="button" onClick={() => runDrawerAction(onOpenStarred)}>
                 <Star size={21} />
                 <span>Starred messages</span>
