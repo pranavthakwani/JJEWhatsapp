@@ -317,6 +317,18 @@ export function createApiRouter(io) {
     requireAppAccess(req, res, next);
   });
 
+  router.get('/capabilities', (_req, res) => {
+    const aiExtraction = isAiExtractionEnabled();
+    res.json({
+      whatsapp: true,
+      contacts: env.features.contacts,
+      broadcasts: env.features.broadcasts,
+      system: env.features.system,
+      aiExtraction,
+      aiWorkflowTest: aiExtraction && env.features.aiWorkflowTest,
+    });
+  });
+
   router.get('/ai/status', async (_req, res, next) => {
     try {
       res.json({
