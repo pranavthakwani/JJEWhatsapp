@@ -1,7 +1,5 @@
-@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap');
-
 :root {
-  font-family: "Roboto", "Helvetica Neue", Arial, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   line-height: 1.35;
   font-weight: 400;
   font-synthesis: none;
@@ -6377,4 +6375,171 @@ label > select,
   .crm-shell--business .leadops-matches button strong { font-size: 12px; }
   .crm-shell--business .leadops-matches button small { font-size: 11px; }
   .crm-shell--business .leadops-matches button b { font-size: 14px; }
+}
+
+/* Phone experience: native-scale typography, touch targets, safe areas, and card layouts. */
+@media (max-width: 720px) {
+  .crm-shell {
+    grid-template-rows: minmax(0, 1fr) calc(54px + env(safe-area-inset-bottom));
+  }
+
+  .crm-navigation {
+    padding: 3px 8px env(safe-area-inset-bottom);
+    background: color-mix(in srgb, var(--app-surface-2) 92%, transparent);
+  }
+
+  @supports (backdrop-filter: blur(18px)) {
+    .crm-navigation { backdrop-filter: blur(18px) saturate(150%); }
+  }
+
+  .crm-navigation nav > button {
+    min-height: 48px;
+    gap: 3px;
+    border-radius: 10px;
+  }
+
+  .crm-navigation__icon svg { width: 24px; height: 24px; }
+  .crm-navigation small { font-size: 10px; }
+
+  .conversation-card {
+    grid-template-columns: 48px minmax(0, 1fr);
+    gap: 12px;
+    min-height: 72px;
+    padding: 10px 16px;
+    content-visibility: auto;
+    contain-intrinsic-size: 72px;
+  }
+
+  .conversation-card__avatar { width: 48px; height: 48px; font-size: 17px; }
+  .conversation-card__top strong { font-size: 17px; line-height: 1.23; font-weight: 600; }
+  .conversation-card__top span, .conversation-card__bottom span { font-size: 12px; }
+  .conversation-card__bottom span:first-child { font-size: 15px; line-height: 1.33; }
+
+  .message-row {
+    content-visibility: auto;
+    contain-intrinsic-size: 52px;
+  }
+
+  .bubble {
+    max-width: 82%;
+    padding: 8px 11px;
+    border-radius: 12px;
+    margin-bottom: 3px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, .08);
+  }
+
+  .bubble--inbound { border-top-left-radius: 2px; }
+  .bubble--outbound { border-top-right-radius: 2px; }
+  .bubble__content p { font-size: 17px; line-height: 1.29; letter-spacing: -.01em; }
+  .bubble__meta { font-size: 11px; }
+  .composer textarea { font-size: 16px; }
+  .composer__icon-button, .composer__attach, .composer__send { width: 44px; height: 44px; }
+
+  .crm-module-header {
+    min-height: 92px;
+    padding: 14px 16px 12px;
+    gap: 10px;
+  }
+
+  .crm-module-header h1 { font-size: 26px; line-height: 1.15; }
+  .crm-module-header p { max-width: 270px; font-size: 13px; line-height: 1.35; }
+  .crm-eyebrow { font-size: 10px; }
+  .crm-header-actions { gap: 6px; }
+  .crm-icon-button { width: 44px; height: 44px; border-radius: 10px; }
+  .crm-primary-button { min-height: 44px; padding: 0 14px; border-radius: 12px; font-size: 14px; }
+  .crm-module-toolbar { min-height: 64px; padding: 10px 14px; }
+  .crm-search-control { min-width: 0; max-width: none; height: 44px; padding: 0 12px; border-radius: 10px; }
+  .crm-search-control input { font-size: 16px; }
+  .crm-result-count { display: none; }
+  .crm-subnav { min-height: 52px; gap: 12px; overflow-x: auto; scrollbar-width: none; }
+  .crm-subnav::-webkit-scrollbar { display: none; }
+  .crm-subnav button { min-height: 48px; white-space: nowrap; font-size: 14px; }
+
+  .leadops-module-content { padding: 14px 12px 28px; }
+  .leadops-kpis article { min-height: 108px; padding: 16px; }
+  .leadops-kpis small { font-size: 13px; }
+  .leadops-kpis strong { font-size: 27px; }
+  .leadops-queue-tabs { scrollbar-width: none; }
+  .leadops-queue-tabs button { min-height: 44px; font-size: 14px; }
+  .leadops-filterbar > select,
+  .leadops-filterbar > label:not(.crm-search-control) { min-height: 44px; min-width: 140px; }
+
+  .contacts-workspace .crm-table-wrap,
+  .leadops-table-wrap,
+  .leadops-recent .crm-table-wrap { overflow-x: hidden; }
+
+  .contacts-workspace .crm-data-table,
+  .leadops-data-table { min-width: 0; display: block; font-size: 14px; }
+
+  .contacts-workspace .crm-data-table thead,
+  .leadops-data-table thead { display: none; }
+
+  .contacts-workspace .crm-data-table tbody,
+  .leadops-data-table tbody {
+    display: grid;
+    gap: 10px;
+    padding: 10px 12px 16px;
+  }
+
+  .contacts-workspace .crm-data-table tr,
+  .leadops-data-table tr {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    border: 1px solid var(--app-border);
+    border-radius: 12px;
+    background: var(--app-surface);
+    overflow: hidden;
+    content-visibility: auto;
+    contain-intrinsic-size: 190px;
+  }
+
+  .contacts-workspace .crm-data-table td,
+  .leadops-data-table td {
+    height: auto;
+    min-width: 0;
+    padding: 10px 12px;
+    border: 0;
+  }
+
+  .contacts-workspace .crm-data-table td::before,
+  .leadops-data-table td::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 4px;
+    color: var(--app-text-muted);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+  }
+
+  .contacts-workspace .crm-data-table td:first-child,
+  .leadops-data-table td:first-child {
+    grid-column: 1 / -1;
+    min-width: 0;
+    max-width: none;
+    padding-top: 13px;
+    border-bottom: 1px solid var(--app-border);
+  }
+
+  .contacts-workspace .crm-data-table td:last-child { display: flex; align-items: end; justify-content: flex-end; }
+  .contacts-workspace .crm-data-table td:last-child::before { margin-right: auto; align-self: center; }
+  .crm-data-table strong { max-width: 100%; font-size: 15px; }
+  .crm-person-cell { min-width: 0; }
+  .crm-person-cell small, .crm-table-subline, .leadops-product-cell small { font-size: 12px; }
+  .crm-avatar { width: 44px; height: 44px; flex-basis: 44px; }
+  .crm-status { font-size: 12px; }
+  .crm-table-actions { width: auto; text-align: left !important; }
+  .crm-table-actions button { width: 44px; height: 44px; }
+  .leadops-table-wrap { max-height: none; border: 0; }
+  .leadops-data-table td:last-child { text-align: right; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
 }

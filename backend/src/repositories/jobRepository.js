@@ -1,8 +1,8 @@
 import { executeProcedure, input, query, sql } from './sqlHelpers.js';
+import { env } from '../config/env.js';
 
-export async function isAiExtractionEnabled() {
-  const result = await query(`SELECT setting_value FROM jje.system_settings WHERE setting_key = 'ai.extraction.enabled';`);
-  return String(result.recordset[0]?.setting_value || '').toLowerCase() === 'true';
+export function isAiExtractionEnabled() {
+  return env.features.aiExtraction;
 }
 
 export async function claimBackgroundJobs({ workerId, jobType, batchSize = 5 }) {

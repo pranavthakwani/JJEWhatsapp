@@ -44,13 +44,13 @@ function QueueTable({ items, selectedId, onSelect }: { items: LeadOpsItem[]; sel
         <thead><tr><th>Product / message</th><th>Contact</th><th>Quantity</th><th>Price</th><th>Confidence</th><th>Status</th><th>Received</th></tr></thead>
         <tbody>{items.map((item) => (
           <tr key={`${item.type}-${item.id}`} className={selectedId === item.id ? 'is-selected' : ''} onClick={() => onSelect(item)}>
-            <td><div className="leadops-product-cell"><span className={`leadops-type-mark leadops-type-mark--${item.type}`} /><div><strong>{productName(item)}</strong><small>{item.sourceText || 'No message text'}</small></div></div></td>
-            <td><strong>{item.contactName}</strong><small className="crm-table-subline">{item.phoneNumber}</small></td>
-            <td>{compactRange(item.quantityMin, item.quantityMax, (value) => value === null ? '—' : String(value))}</td>
-            <td className="crm-mono">{compactRange(item.priceMin, item.priceMax, money)}</td>
-            <td><span className="leadops-confidence"><i style={{ '--confidence': `${(item.confidence || 0) * 100}%` } as CSSProperties} />{confidenceLabel(item.confidence)}</span></td>
-            <td><StatusBadge status={item.status} /></td>
-            <td><time>{new Date(item.createdAt).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</time></td>
+            <td data-label="Product / message"><div className="leadops-product-cell"><span className={`leadops-type-mark leadops-type-mark--${item.type}`} /><div><strong>{productName(item)}</strong><small>{item.sourceText || 'No message text'}</small></div></div></td>
+            <td data-label="Contact"><strong>{item.contactName}</strong><small className="crm-table-subline">{item.phoneNumber}</small></td>
+            <td data-label="Quantity">{compactRange(item.quantityMin, item.quantityMax, (value) => value === null ? '—' : String(value))}</td>
+            <td data-label="Price" className="crm-mono">{compactRange(item.priceMin, item.priceMax, money)}</td>
+            <td data-label="Confidence"><span className="leadops-confidence"><i style={{ '--confidence': `${(item.confidence || 0) * 100}%` } as CSSProperties} />{confidenceLabel(item.confidence)}</span></td>
+            <td data-label="Status"><StatusBadge status={item.status} /></td>
+            <td data-label="Received"><time>{new Date(item.createdAt).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</time></td>
           </tr>
         ))}</tbody>
       </table>

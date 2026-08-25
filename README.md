@@ -70,15 +70,44 @@ Device approval is controlled by `AUTH_DEVICE_APPROVAL_REQUIRED`. Set it to `fal
 registered browsers use the application without admin approval, or `true` to enforce the
 stored pending/approved/blocked device statuses. Restart the API service after changing it.
 
-## Optional AI extraction
+## Rotate the Meta access token
 
-Keep `ai.extraction.enabled=false` for standalone WhatsApp. To enable later, configure
-`OPENAI_API_KEY` and `OPENAI_MODEL` in the worker environment, then run from `backend`:
+Meta access tokens are encrypted in SQL and must not be pasted into `.env`, chat, source files,
+or command history. Copy the new token, then run from `backend` in PowerShell:
 
 ```powershell
-$env:JJE_AI_ENABLED = 'true'
+$env:META_ACCESS_TOKEN = (Get-Clipboard -Raw).Trim()
+$env:META_PHONE_NUMBER_ID = 'YOUR_META_PHONE_NUMBER_ID'
+$env:META_WABA_ID = 'YOUR_WHATSAPP_BUSINESS_ACCOUNT_ID'
+npm run meta:rotate-token
+Remove-Item Env:META_ACCESS_TOKEN, Env:META_PHONE_NUMBER_ID, Env:META_WABA_ID
+Set-Clipboard -Value 'cleared'
+```
+
+The command validates access to the configured Phone Number ID and WABA ID before changing SQL.
+Restart the API service after a successful rotation.
+
+All user-facing runtime switches are grouped under `# TOGGLES` in `backend/.env`:
+
+- `FEATURE_CONTACTS_ENABLED`
+- `FEATURE_BROADCASTS_ENABLED`
+- `FEATURE_SYSTEM_ENABLED`
+- `AI_EXTRACTION_ENABLED`
+- `AI_WORKFLOW_TEST_ENABLED`
+- `AUTH_REQUIRE_USER`
+- `AUTH_DEVICE_APPROVAL_REQUIRED`
+
+Disabled optional modules are omitted from the frontend capability response and navigation.
+
+## Optional AI extraction
+
+Keep `AI_EXTRACTION_ENABLED=false` for standalone WhatsApp. To enable later, configure
+`OPENAI_API_KEY` and `OPENAI_MODEL`, set `AI_EXTRACTION_ENABLED=true`, and restart the API
+and extraction worker. `AI_WORKFLOW_TEST_ENABLED` independently controls the frontend test tool.
+To validate the current env configuration from `backend`, run:
+
+```powershell
 node scripts\configure-ai.mjs
-Remove-Item Env:JJE_AI_ENABLED
 ```
 
 The extractor uses the OpenAI Responses API with strict structured output and `store: false`.

@@ -13,7 +13,7 @@ export async function startAiWorkflowTest({ text, io }) {
     error.code = 'INVALID_WORKFLOW_TEST_MESSAGE';
     throw error;
   }
-  if (!(await isAiExtractionEnabled()) || !env.ai.apiKey || !env.ai.model) {
+  if (!env.features.aiWorkflowTest || !isAiExtractionEnabled() || !env.ai.apiKey || !env.ai.model) {
     const error = new Error('AI extraction must be enabled and configured before running this test.');
     error.statusCode = 409;
     error.code = 'AI_EXTRACTION_UNAVAILABLE';

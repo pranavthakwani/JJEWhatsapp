@@ -8,11 +8,12 @@
     "dev": "node src/server.js",
     "start": "node src/server.js",
     "worker": "node src/worker.js",
-    "check": "node --check src/server.js && node --check src/app.js",
+    "check": "node --check src/server.js && node --check src/app.js && node --check src/routes/api.js",
     "test": "node test/security.test.js",
     "test:integration": "node test/database.integration.test.js",
     "test:leadops": "node test/leadops.database.integration.test.js",
     "auth:bootstrap-admin": "node scripts/bootstrap-admin.mjs",
+    "meta:rotate-token": "node scripts/rotate-meta-access-token.mjs",
     "ai:configure": "node scripts/configure-ai.mjs",
     "db:migrate": "node ../database/scripts/apply-migrations.mjs",
     "db:verify": "node ../database/scripts/verify-schema.mjs"

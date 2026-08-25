@@ -24,6 +24,8 @@ type Props = {
   onOpenStarred: () => void;
   onOpenDevices: () => void;
   leadOpsEnabled: boolean;
+  broadcastsEnabled: boolean;
+  contactsEnabled: boolean;
   onOpenLeadOps: () => void;
   onResetDevice: () => void;
   onComposeCampaign: () => void;
@@ -167,6 +169,8 @@ export function ConversationList({
   onOpenStarred,
   onOpenDevices,
   leadOpsEnabled,
+  broadcastsEnabled,
+  contactsEnabled,
   onOpenLeadOps,
   onResetDevice,
   onComposeCampaign,
@@ -224,6 +228,7 @@ export function ConversationList({
     })
   ), [activeMemberKeySet, chatFilter, conversations]);
   const filteredContactLists = useMemo(() => {
+    if (!broadcastsEnabled) return [] as ContactList[];
     if (chatFilter === 'unread') return [] as ContactList[];
 
     const query = search.trim().toLowerCase();
@@ -234,7 +239,7 @@ export function ConversationList({
     if (!query) return filteredByMode;
 
     return filteredByMode.filter((list) => list.name.toLowerCase().includes(query));
-  }, [activeMemberKeySet, chatFilter, contactLists, search]);
+  }, [activeMemberKeySet, broadcastsEnabled, chatFilter, contactLists, search]);
   const visibleChatCount = filteredConversations.length + filteredContactLists.length;
   const selectedNumber = numbers.find((number) => number.id === selectedPhoneNumberId) || null;
   const selectedNumberWithProfile = selectedNumber as BusinessNumberWithProfile | null;
@@ -250,13 +255,13 @@ export function ConversationList({
       subtitle: conversation.contactPhone || conversation.contactWaId,
       kind: 'chat' as const,
     })),
-    ...contactLists.map((list) => ({
+    ...(broadcastsEnabled ? contactLists : []).map((list) => ({
       key: makeBroadcastMemberKey(list.id),
       title: list.name,
       subtitle: `Broadcast list - ${list.memberCount ?? list.members?.length ?? 0} recipients`,
       kind: 'broadcast' as const,
     })),
-  ], [contactLists, conversations]);
+  ], [broadcastsEnabled, contactLists, conversations]);
 
   useEffect(() => {
     let cancelled = false;
@@ -682,18 +687,18 @@ export function ConversationList({
                 <Star size={21} />
                 <span>Starred messages</span>
               </button>
-              <button type="button" onClick={() => runDrawerAction(onComposeCampaign)}>
+              {broadcastsEnabled && <button type="button" onClick={() => runDrawerAction(onComposeCampaign)}>
                 <Megaphone size={21} />
                 <span>New broadcast</span>
-              </button>
+              </button>}
               <button type="button" onClick={() => runDrawerAction(onStartChat)}>
                 <MessageSquarePlus size={21} />
                 <span>Start chat</span>
               </button>
-              <button type="button" onClick={() => runDrawerAction(onAddContact)}>
+              {contactsEnabled && <button type="button" onClick={() => runDrawerAction(onAddContact)}>
                 <UserPlus size={21} />
                 <span>Add contact</span>
-              </button>
+              </button>}
               <button type="button" onClick={() => runDrawerAction(onOpenDevices)}>
                 <ShieldCheck size={21} />
                 <span>Devices</span>

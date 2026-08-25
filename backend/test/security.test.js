@@ -6,6 +6,7 @@ import { buildMessagePreview, extractInboundMessageParts, normaliseRecipientWaId
 import { normalizeExtraction } from '../src/ai/extractionService.js';
 import { extractPrices, isLikelyPriceFollowup } from '../src/ai/priceParser.js';
 import { toPublicBusinessNumber } from '../src/repositories/businessRepository.js';
+import { dataDeletionPage, privacyPolicyPage } from '../src/legalPages.js';
 
 test('password hashes are salted and reject invalid credentials', () => {
   const first = hashPassword('a-production-password');
@@ -68,4 +69,14 @@ test('public business number DTO never serializes Meta credentials', () => {
   const publicNumber = toPublicBusinessNumber({ id: 1, displayName: 'JJE', accessToken: 'secret', verifyToken: 'verify' });
   assert.deepEqual(publicNumber, { id: 1, displayName: 'JJE' });
   assert.equal(JSON.stringify(publicNumber).includes('secret'), false);
+});
+
+test('public legal pages include required privacy and deletion information', () => {
+  const privacy = privacyPolicyPage();
+  const deletion = dataDeletionPage();
+  assert.match(privacy, /Privacy Policy/);
+  assert.match(privacy, /Information we process/);
+  assert.match(privacy, /Data Deletion Instructions/);
+  assert.match(deletion, /DELETE MY DATA/);
+  assert.doesNotMatch(`${privacy}${deletion}`, /META_ACCESS_TOKEN|DB_PASSWORD/);
 });

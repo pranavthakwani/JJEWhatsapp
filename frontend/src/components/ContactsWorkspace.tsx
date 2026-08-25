@@ -68,11 +68,11 @@ export function ContactsWorkspace({ onAddContact, onStartConversation }: Props) 
           <tbody>
             {loading ? Array.from({ length: 9 }).map((_, index) => <tr className="crm-skeleton-row" key={index}><td><span /></td><td><span /></td><td><span /></td><td><span /></td><td /></tr>) : contacts.map((contact) => (
               <tr key={contact.id}>
-                <td><div className="crm-person-cell"><span className="crm-avatar"><UserRound size={17} /></span><div>{editingId === contact.id ? <form onSubmit={(event) => { event.preventDefault(); void saveName(contact); }}><input autoFocus value={editingName} onChange={(event) => setEditingName(event.target.value)} onBlur={() => setEditingId(null)} /></form> : <><strong>{contactName(contact)}</strong><small>{contact.profileName && contact.businessDirectoryName ? `WhatsApp: ${contact.profileName}` : `ID ${contact.id}`}</small></>}</div></div></td>
-                <td><span className="crm-mono">{contact.phoneNumber || contact.waId}</span></td>
-                <td><span className={`crm-status crm-status--${contact.optInStatus}`}><i />{contact.optInStatus.replace('_', ' ')}</span></td>
-                <td>{contact.lastInboundAt || contact.lastOutboundAt ? new Date(contact.lastInboundAt || contact.lastOutboundAt || '').toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : 'No activity'}</td>
-                <td className="crm-table-actions"><button type="button" title="Rename" onClick={() => { setEditingId(contact.id); setEditingName(contactName(contact)); }}><Pencil size={15} /></button><button type="button" title="Open conversation" onClick={() => void onStartConversation(contact)}><MessageCircleMore size={16} /></button></td>
+                <td data-label="Contact"><div className="crm-person-cell"><span className="crm-avatar"><UserRound size={17} /></span><div>{editingId === contact.id ? <form onSubmit={(event) => { event.preventDefault(); void saveName(contact); }}><input autoFocus value={editingName} onChange={(event) => setEditingName(event.target.value)} onBlur={() => setEditingId(null)} /></form> : <><strong>{contactName(contact)}</strong><small>{contact.profileName && contact.businessDirectoryName ? `WhatsApp: ${contact.profileName}` : `ID ${contact.id}`}</small></>}</div></div></td>
+                <td data-label="Phone"><span className="crm-mono">{contact.phoneNumber || contact.waId}</span></td>
+                <td data-label="Opt-in"><span className={`crm-status crm-status--${contact.optInStatus}`}><i />{contact.optInStatus.replace('_', ' ')}</span></td>
+                <td data-label="Last activity">{contact.lastInboundAt || contact.lastOutboundAt ? new Date(contact.lastInboundAt || contact.lastOutboundAt || '').toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : 'No activity'}</td>
+                <td data-label="Actions" className="crm-table-actions"><button type="button" title="Rename" aria-label={`Rename ${contactName(contact)}`} onClick={() => { setEditingId(contact.id); setEditingName(contactName(contact)); }}><Pencil size={15} /></button><button type="button" title="Open conversation" aria-label={`Open chat with ${contactName(contact)}`} onClick={() => void onStartConversation(contact)}><MessageCircleMore size={16} /></button></td>
               </tr>
             ))}
           </tbody>

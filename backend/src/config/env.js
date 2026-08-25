@@ -86,6 +86,13 @@ export const env = {
     maxOutputTokens: integer(process.env.OPENAI_MAX_OUTPUT_TOKENS, 1800, { min: 200, max: 10_000 }),
     useEnvProxy: boolean(process.env.OPENAI_USE_ENV_PROXY, false),
   },
+  features: {
+    contacts: boolean(process.env.FEATURE_CONTACTS_ENABLED, true),
+    broadcasts: boolean(process.env.FEATURE_BROADCASTS_ENABLED, true),
+    system: boolean(process.env.FEATURE_SYSTEM_ENABLED, true),
+    aiExtraction: boolean(process.env.AI_EXTRACTION_ENABLED, false),
+    aiWorkflowTest: boolean(process.env.AI_WORKFLOW_TEST_ENABLED, false),
+  },
   auth: {
     secret: authSecret || 'development-only-auth-secret-change-me',
     tokenEncryptionKey: tokenEncryptionKey || 'development-only-token-key-change-me',

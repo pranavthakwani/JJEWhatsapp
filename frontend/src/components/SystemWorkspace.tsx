@@ -10,7 +10,7 @@ type Props = {
 
 export function SystemWorkspace({ numbers, deviceApprovalRequired }: Props) {
   const [health, setHealth] = useState<{ ok: boolean; database: string } | null>(null);
-  const [ai, setAi] = useState<{ enabled: boolean; configured: boolean; model: string | null } | null>(null);
+  const [ai, setAi] = useState<{ enabled: boolean; workflowTestEnabled: boolean; configured: boolean; model: string | null } | null>(null);
   const [loading, setLoading] = useState(true);
   const [testMessage, setTestMessage] = useState('WANT TO SELL: Samsung Galaxy A15 5G 8/128, 12 units, fresh stock, ₹14,500 each, GST included, dispatch from Surat.');
   const [workflowTest, setWorkflowTest] = useState<AiWorkflowTest | null>(null);
@@ -22,7 +22,7 @@ export function SystemWorkspace({ numbers, deviceApprovalRequired }: Props) {
     setLoading(true);
     const [healthResult, aiResult] = await Promise.allSettled([getHealthStatus(), getAiStatus()]);
     setHealth(healthResult.status === 'fulfilled' ? healthResult.value : { ok: false, database: 'unavailable' });
-    setAi(aiResult.status === 'fulfilled' ? aiResult.value : { enabled: false, configured: false, model: null });
+    setAi(aiResult.status === 'fulfilled' ? aiResult.value : { enabled: false, workflowTestEnabled: false, configured: false, model: null });
     setLoading(false);
   }
 
@@ -85,7 +85,7 @@ export function SystemWorkspace({ numbers, deviceApprovalRequired }: Props) {
       <div className="system-checks">
         {checks.map((check) => <article key={check.label}><span className="system-checks__icon"><check.icon size={19} /></span><div><strong>{check.label}</strong><small>{check.detail}</small></div>{check.neutral ? <HardDrive size={17} /> : check.ok ? <CheckCircle2 className="is-ok" size={18} /> : <XCircle className="is-error" size={18} />}</article>)}
       </div>
-      {ai?.enabled && <section className="system-workflow-test">
+      {ai?.enabled && ai.workflowTestEnabled && <section className="system-workflow-test">
         <header><div><span><Beaker size={18} />AI workflow test</span><p>Simulate an inbound WhatsApp message and follow it through the real SQL queue and extraction worker.</p></div><em>Uses one AI request</em></header>
         <div className="system-workflow-test__body">
           <label>Test WhatsApp message<textarea value={testMessage} maxLength={4000} onChange={(event) => setTestMessage(event.target.value)} disabled={testRunning} /></label>

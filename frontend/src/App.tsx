@@ -22,7 +22,7 @@ import {
   deleteConversation,
   deleteMessage,
   getBootstrap,
-  getAiStatus,
+  getCapabilities,
   getAuthStatus,
   getCachedBootstrap,
   getCachedConversations,
@@ -46,12 +46,22 @@ import {
   updateAuthDevice,
   uploadMedia,
 } from './lib/api';
+import type { AppCapabilities } from './lib/api';
 import { socket } from './lib/socket';
 import type { AuthDevice, AuthStatus, BootstrapPayload, Campaign, Contact, ContactList, Conversation, Message, StarredMessage } from './types';
 
 const LazyLeadOpsWorkspace = lazy(() => import('./components/LeadOpsWorkspace').then((module) => ({ default: module.LeadOpsWorkspace })));
 const LazyContactsWorkspace = lazy(() => import('./components/ContactsWorkspace').then((module) => ({ default: module.ContactsWorkspace })));
 const LazySystemWorkspace = lazy(() => import('./components/SystemWorkspace').then((module) => ({ default: module.SystemWorkspace })));
+
+const DEFAULT_CAPABILITIES: AppCapabilities = {
+  whatsapp: true,
+  contacts: false,
+  broadcasts: false,
+  system: false,
+  aiExtraction: false,
+  aiWorkflowTest: false,
+};
 
 type BroadcastSendPayload = {
   bodyText: string;
@@ -235,7 +245,7 @@ export default function App() {
   const [authError, setAuthError] = useState('');
   const [deviceManagerOpen, setDeviceManagerOpen] = useState(false);
   const [activeWorkspace, setActiveWorkspace] = useState<CrmWorkspace>('whatsapp');
-  const [aiEnabled, setAiEnabled] = useState(false);
+  const [capabilities, setCapabilities] = useState<AppCapabilities>(DEFAULT_CAPABILITIES);
   const [devices, setDevices] = useState<AuthDevice[]>([]);
   const [devicesLoading, setDevicesLoading] = useState(false);
   const [devicesError, setDevicesError] = useState('');
@@ -629,22 +639,27 @@ export default function App() {
 
   useEffect(() => {
     if (!canUseApp) {
-      setAiEnabled(false);
+      setCapabilities(DEFAULT_CAPABILITIES);
       setActiveWorkspace('whatsapp');
       return;
     }
 
     let cancelled = false;
-    void getAiStatus()
-      .then((status) => {
+    void getCapabilities()
+      .then((nextCapabilities) => {
         if (cancelled) return;
-        setAiEnabled(status.enabled);
-        if (!status.enabled) setActiveWorkspace((current) => current === 'leadops' ? 'whatsapp' : current);
+        setCapabilities(nextCapabilities);
+        setActiveWorkspace((current) => {
+          if (current === 'contacts' && !nextCapabilities.contacts) return 'whatsapp';
+          if (current === 'leadops' && !nextCapabilities.aiExtraction) return 'whatsapp';
+          if (current === 'system' && !nextCapabilities.system) return 'whatsapp';
+          return current;
+        });
       })
       .catch(() => {
         if (cancelled) return;
-        setAiEnabled(false);
-        setActiveWorkspace((current) => current === 'leadops' ? 'whatsapp' : current);
+        setCapabilities(DEFAULT_CAPABILITIES);
+        setActiveWorkspace('whatsapp');
       });
     return () => { cancelled = true; };
   }, [canUseApp]);
@@ -655,9 +670,9 @@ export default function App() {
   }, [canUseApp, bootstrapped, selectedPhoneNumberId, deferredSearch]);
 
   useEffect(() => {
-    if (!canUseApp || !bootstrapped || !selectedPhoneNumberId) return;
+    if (!canUseApp || !bootstrapped || !selectedPhoneNumberId || !capabilities.broadcasts) return;
     void loadContactLists(selectedPhoneNumberId);
-  }, [canUseApp, bootstrapped, selectedPhoneNumberId]);
+  }, [canUseApp, bootstrapped, selectedPhoneNumberId, capabilities.broadcasts]);
 
   useEffect(() => {
     if (!activeConversation) return;
@@ -1403,7 +1418,7 @@ export default function App() {
       <div className={`crm-shell ${activeWorkspace !== 'whatsapp' ? 'crm-shell--business' : ''} ${isMobileLayout && isChatOpen && activeWorkspace === 'whatsapp' ? 'crm-shell--focused-chat' : ''}`}>
         <CrmNavigation
           active={activeWorkspace}
-          aiEnabled={aiEnabled}
+          capabilities={capabilities}
           theme={theme}
           unreadCount={totalUnreadCount}
           onNavigate={setActiveWorkspace}
@@ -1416,7 +1431,7 @@ export default function App() {
           numbers={numbers}
           selectedPhoneNumberId={selectedPhoneNumberId}
           conversations={conversations}
-          contactLists={contactLists}
+          contactLists={capabilities.broadcasts ? contactLists : []}
           activeConversationId={activeConversation?.id ?? null}
           activeContactListId={activeContactListId}
           mutedConversationIds={mutedConversationIds}
@@ -1446,7 +1461,9 @@ export default function App() {
           }}
           onOpenStarred={() => void openStarredMessages()}
           onOpenDevices={() => setDeviceManagerOpen(true)}
-          leadOpsEnabled={aiEnabled}
+          leadOpsEnabled={capabilities.aiExtraction}
+          broadcastsEnabled={capabilities.broadcasts}
+          contactsEnabled={capabilities.contacts}
           onOpenLeadOps={() => setActiveWorkspace('leadops')}
           onResetDevice={() => void handleResetDevice()}
           onRefresh={() => {
@@ -1538,9 +1555,9 @@ export default function App() {
 
           {activeWorkspace !== 'whatsapp' && (
             <Suspense fallback={<WorkspaceLoading />}>
-              {activeWorkspace === 'contacts' && <LazyContactsWorkspace onAddContact={() => setAddContactOpen(true)} onStartConversation={handleStartChat} />}
-              {activeWorkspace === 'leadops' && aiEnabled && <LazyLeadOpsWorkspace onOpenConversation={(conversationId) => void openConversationFromWorkspace(conversationId)} />}
-              {activeWorkspace === 'system' && <LazySystemWorkspace numbers={numbers} deviceApprovalRequired={authStatus.deviceApprovalRequired} />}
+              {activeWorkspace === 'contacts' && capabilities.contacts && <LazyContactsWorkspace onAddContact={() => setAddContactOpen(true)} onStartConversation={handleStartChat} />}
+              {activeWorkspace === 'leadops' && capabilities.aiExtraction && <LazyLeadOpsWorkspace onOpenConversation={(conversationId) => void openConversationFromWorkspace(conversationId)} />}
+              {activeWorkspace === 'system' && capabilities.system && <LazySystemWorkspace numbers={numbers} deviceApprovalRequired={authStatus.deviceApprovalRequired} />}
             </Suspense>
           )}
         </div>

@@ -1,11 +1,12 @@
 import { BookUser, Bot, MessageCircleMore, Moon, Settings, SunMedium } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
+import type { AppCapabilities } from '../lib/api';
 
 export type CrmWorkspace = 'whatsapp' | 'contacts' | 'leadops' | 'system';
 
 type Props = {
   active: CrmWorkspace;
-  aiEnabled: boolean;
+  capabilities: AppCapabilities;
   theme: 'dark' | 'light';
   unreadCount: number;
   onNavigate: (workspace: CrmWorkspace) => void;
@@ -17,22 +18,27 @@ type NavItem = {
   label: string;
   shortLabel: string;
   icon: LucideIcon;
-  aiOnly?: boolean;
 };
 
 const ITEMS: NavItem[] = [
   { id: 'whatsapp', label: 'WhatsApp', shortLabel: 'Chats', icon: MessageCircleMore },
   { id: 'contacts', label: 'Contacts', shortLabel: 'Contacts', icon: BookUser },
-  { id: 'leadops', label: 'Lead intelligence', shortLabel: 'LeadOps', icon: Bot, aiOnly: true },
+  { id: 'leadops', label: 'Lead intelligence', shortLabel: 'LeadOps', icon: Bot },
   { id: 'system', label: 'System', shortLabel: 'System', icon: Settings },
 ];
 
-export function CrmNavigation({ active, aiEnabled, theme, unreadCount, onNavigate, onToggleTheme }: Props) {
+export function CrmNavigation({ active, capabilities, theme, unreadCount, onNavigate, onToggleTheme }: Props) {
+  const visible = ITEMS.filter((item) => (
+    item.id === 'whatsapp'
+    || (item.id === 'contacts' && capabilities.contacts)
+    || (item.id === 'leadops' && capabilities.aiExtraction)
+    || (item.id === 'system' && capabilities.system)
+  ));
   return (
     <aside className="crm-navigation" aria-label="Primary navigation">
       <div className="crm-navigation__brand" title="Jay Jalaram Enterprise"><span>J</span></div>
       <nav>
-        {ITEMS.filter((item) => !item.aiOnly || aiEnabled).map((item) => (
+        {visible.map((item) => (
           <button
             key={item.id}
             type="button"

@@ -3,6 +3,7 @@ import express from 'express';
 import { createApiRouter } from './routes/api.js';
 import { env } from './config/env.js';
 import { logger } from './utils/logger.js';
+import { dataDeletionPage, privacyPolicyPage } from './legalPages.js';
 import { requestContext, rateLimit, securityHeaders, verifyRequestOrigin } from './middleware/requestSecurity.js';
 
 export function createApp(io) {
@@ -29,6 +30,16 @@ export function createApp(io) {
     limit: '10mb',
     verify: (req, _res, buffer) => { req.rawBody = Buffer.from(buffer); },
   }));
+
+  app.get('/privacy-policy', (_req, res) => {
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.type('html').send(privacyPolicyPage());
+  });
+
+  app.get('/data-deletion', (_req, res) => {
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.type('html').send(dataDeletionPage());
+  });
   app.use(verifyRequestOrigin(env.socketCorsOrigin));
   app.use(express.json({ limit: '10mb' }));
   app.use('/api/auth', rateLimit({ windowMs: 60_000, max: 10, scope: 'auth' }));

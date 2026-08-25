@@ -30,6 +30,15 @@ import type {
 
 export type ChatFilterMemberKey = `conversation:${number}` | `broadcast:${number}`;
 
+export type AppCapabilities = {
+  whatsapp: true;
+  contacts: boolean;
+  broadcasts: boolean;
+  system: boolean;
+  aiExtraction: boolean;
+  aiWorkflowTest: boolean;
+};
+
 export type StoredChatFilter = {
   id: string;
   name: string;
@@ -528,7 +537,12 @@ export function getCampaignMediaUrl(campaignId: number) {
 }
 
 export async function getAiStatus() {
-  const { data } = await api.get<{ enabled: boolean; configured: boolean; model: string | null }>('/ai/status');
+  const { data } = await api.get<{ enabled: boolean; workflowTestEnabled: boolean; configured: boolean; model: string | null }>('/ai/status');
+  return data;
+}
+
+export async function getCapabilities() {
+  const { data } = await api.get<AppCapabilities>('/capabilities');
   return data;
 }
 

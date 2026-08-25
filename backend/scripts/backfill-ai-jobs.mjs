@@ -15,20 +15,18 @@ const pool = await new sql.ConnectionPool({
 
 try {
   const status = await pool.request().query(`
-    SELECT
-      CASE WHEN EXISTS(SELECT 1 FROM jje.system_settings WHERE setting_key='ai.extraction.enabled' AND LOWER(setting_value)='true') THEN 1 ELSE 0 END enabled,
-      COUNT_BIG(*) eligible
+    SELECT COUNT_BIG(*) eligible
     FROM jje.messages message
     WHERE message.deleted_at IS NULL AND COALESCE(NULLIF(message.text_body,''),NULLIF(message.caption,'')) IS NOT NULL
       AND NOT EXISTS(SELECT 1 FROM jje.message_analysis analysis WHERE analysis.message_id=message.message_id AND analysis.analysis_version=1)
       AND NOT EXISTS(SELECT 1 FROM jje.background_jobs job WHERE job.deduplication_key=CONCAT('ai:message:',message.message_id,':v1'));
   `);
-  const { enabled, eligible } = status.recordset[0];
+  const { eligible } = status.recordset[0];
   if (!apply) {
-    console.log(`AI_BACKFILL_DRY_RUN eligible=${eligible} requestedLimit=${limit} aiEnabled=${Boolean(enabled)}`);
+    console.log(`AI_BACKFILL_DRY_RUN eligible=${eligible} requestedLimit=${limit} aiEnabled=${env.features.aiExtraction}`);
     process.exit(0);
   }
-  if (!enabled) throw new Error('AI extraction must be enabled before historical jobs can be queued.');
+  if (!env.features.aiExtraction) throw new Error('Set AI_EXTRACTION_ENABLED=true before historical jobs can be queued.');
   if (!env.ai.apiKey || !env.ai.model) throw new Error('OPENAI_API_KEY and OPENAI_MODEL are required before historical jobs can be queued.');
 
   const result = await pool.request().input('limit', sql.Int, limit).query(`
