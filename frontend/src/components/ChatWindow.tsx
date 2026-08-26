@@ -668,6 +668,7 @@ export function ChatWindow({
   const [voiceError, setVoiceError] = useState('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const preserveComposerFocusRef = useRef(false);
   const messagesViewportRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -678,6 +679,7 @@ export function ChatWindow({
   const olderLoadRequestRef = useRef(false);
   const jumpHighlightTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const messageLongPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stickToLatestRef = useRef(true);
   const voiceHoldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const voiceTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const voiceRecorderRef = useRef<MediaRecorder | null>(null);
@@ -944,6 +946,14 @@ export function ChatWindow({
     setShowJumpToLatest(distanceFromBottom > JUMP_TO_LATEST_THRESHOLD_PX);
   }
 
+  function scrollMessagesToLatest() {
+    const viewport = messagesViewportRef.current;
+    if (!viewport) return;
+    viewport.scrollTop = viewport.scrollHeight;
+    stickToLatestRef.current = true;
+    syncJumpToLatestVisibility(viewport);
+  }
+
   useLayoutEffect(() => {
     if (!messagesViewportRef.current) return;
 
@@ -962,9 +972,37 @@ export function ChatWindow({
       return;
     }
 
-    messagesViewportRef.current.scrollTop = messagesViewportRef.current.scrollHeight;
-    syncJumpToLatestVisibility(messagesViewportRef.current);
+    scrollMessagesToLatest();
   }, [conversation?.id, lastMessageId, loading, visibleMessages.length]);
+
+  useEffect(() => {
+    const visualViewport = window.visualViewport;
+    const composer = textareaRef.current;
+    let frame = 0;
+    let settleTimer = 0;
+
+    const keepLatestAboveKeyboard = () => {
+      if (document.activeElement !== composer && !stickToLatestRef.current) return;
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(settleTimer);
+      frame = window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(scrollMessagesToLatest);
+      });
+      settleTimer = window.setTimeout(scrollMessagesToLatest, 180);
+    };
+
+    composer?.addEventListener('focus', keepLatestAboveKeyboard);
+    visualViewport?.addEventListener('resize', keepLatestAboveKeyboard);
+    visualViewport?.addEventListener('scroll', keepLatestAboveKeyboard);
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(settleTimer);
+      composer?.removeEventListener('focus', keepLatestAboveKeyboard);
+      visualViewport?.removeEventListener('resize', keepLatestAboveKeyboard);
+      visualViewport?.removeEventListener('scroll', keepLatestAboveKeyboard);
+    };
+  }, [conversation?.id]);
 
   useEffect(() => {
     if (!searchOpen) return;
@@ -1221,12 +1259,16 @@ export function ChatWindow({
   async function handleSubmit() {
     if (submitLockRef.current || sending || isNormalChatLocked) return;
 
+    const shouldPreserveComposerFocus =
+      preserveComposerFocusRef.current || document.activeElement === textareaRef.current;
     const outgoingFile = file;
     const outgoingDraft = draft.trim();
     const outgoingReplyTarget = replyTarget;
     if (!outgoingFile && !outgoingDraft) return;
 
     submitLockRef.current = true;
+    stickToLatestRef.current = true;
+    window.requestAnimationFrame(scrollMessagesToLatest);
 
     if (outgoingFile) {
       setFile(null);
@@ -1251,6 +1293,12 @@ export function ChatWindow({
       setReplyTarget(outgoingReplyTarget);
     } finally {
       submitLockRef.current = false;
+      preserveComposerFocusRef.current = false;
+      if (shouldPreserveComposerFocus && !isNormalChatLocked) {
+        window.requestAnimationFrame(() => {
+          textareaRef.current?.focus({ preventScroll: true });
+        });
+      }
     }
   }
 
@@ -1500,8 +1548,10 @@ export function ChatWindow({
 
   function handleMessagesScroll() {
     if (!messagesViewportRef.current) return;
-    syncJumpToLatestVisibility(messagesViewportRef.current);
-    if (messagesViewportRef.current.scrollTop <= OLDER_MESSAGES_AUTOLOAD_OFFSET_PX) {
+    const viewport = messagesViewportRef.current;
+    stickToLatestRef.current = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= JUMP_TO_LATEST_THRESHOLD_PX;
+    syncJumpToLatestVisibility(viewport);
+    if (viewport.scrollTop <= OLDER_MESSAGES_AUTOLOAD_OFFSET_PX) {
       requestOlderMessages();
     }
   }
@@ -1915,64 +1965,75 @@ export function ChatWindow({
         )}
 
         <div className="composer">
-          <div ref={emojiRef} className="composer__emoji-anchor">
-            <button
-              type="button"
-              className="composer__icon-button"
-              title="Emoji"
-              onClick={handleToggleEmojiPicker}
-            >
-              <Smile size={19} />
-            </button>
+          <div className="composer__input-shell">
+            <div ref={emojiRef} className="composer__emoji-anchor">
+              <button
+                type="button"
+                className="composer__icon-button"
+                title="Emoji"
+                onClick={handleToggleEmojiPicker}
+              >
+                <Smile size={19} />
+              </button>
 
-            {emojiPickerOpen && (
-              <div className="emoji-picker-shell">
-                <Suspense fallback={<div className="emoji-picker-loading"><span className="skeleton-line skeleton-line--wide" /></div>}>
-                  <EmojiPicker
-                    open
-                    onEmojiClick={handleEmojiClick}
-                    theme={theme as Theme}
-                    emojiStyle={'native' as EmojiStyle}
-                    lazyLoadEmojis
-                    width={320}
-                    height={380}
-                    autoFocusSearch={false}
-                    searchPlaceholder="Search emoji"
-                    previewConfig={{ showPreview: false }}
-                  />
-                </Suspense>
-              </div>
-            )}
+              {emojiPickerOpen && (
+                <div className="emoji-picker-shell">
+                  <Suspense fallback={<div className="emoji-picker-loading"><span className="skeleton-line skeleton-line--wide" /></div>}>
+                    <EmojiPicker
+                      open
+                      onEmojiClick={handleEmojiClick}
+                      theme={theme as Theme}
+                      emojiStyle={'native' as EmojiStyle}
+                      lazyLoadEmojis
+                      width={320}
+                      height={380}
+                      autoFocusSearch={false}
+                      searchPlaceholder="Search emoji"
+                      previewConfig={{ showPreview: false }}
+                    />
+                  </Suspense>
+                </div>
+              )}
+            </div>
+
+            <textarea
+              ref={textareaRef}
+              rows={1}
+              value={draft}
+              placeholder={isNormalChatLocked ? 'Send a template message first' : file ? 'Add caption' : 'Type a message'}
+              disabled={isNormalChatLocked}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey && shouldSubmitOnEnter()) {
+                  event.preventDefault();
+                  void handleSubmit();
+                }
+              }}
+            />
+
+            <label className="composer__attach" title="Attach">
+              <Paperclip size={18} />
+              <input
+                ref={fileInputRef}
+                type="file"
+                hidden
+                disabled={isNormalChatLocked}
+                onChange={(event) => setFile(event.target.files?.[0] || null)}
+              />
+            </label>
           </div>
 
-          <label className="composer__attach" title="Attach">
-            <Paperclip size={18} />
-            <input
-              ref={fileInputRef}
-              type="file"
-              hidden
-              disabled={isNormalChatLocked}
-              onChange={(event) => setFile(event.target.files?.[0] || null)}
-            />
-          </label>
-
-          <textarea
-            ref={textareaRef}
-            rows={1}
-            value={draft}
-            placeholder={isNormalChatLocked ? 'Send a template message first' : file ? 'Add caption' : 'Type a message'}
-            disabled={isNormalChatLocked}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey && shouldSubmitOnEnter()) {
-                event.preventDefault();
-                void handleSubmit();
-              }
-            }}
-          />
-
           {draft.trim() || file ? (
-            <button type="button" className="composer__send" onClick={() => void handleSubmit()} disabled={sending || isNormalChatLocked}>
+            <button
+              type="button"
+              className="composer__send"
+              onPointerDown={(event) => {
+                preserveComposerFocusRef.current = document.activeElement === textareaRef.current;
+                if (preserveComposerFocusRef.current) event.preventDefault();
+              }}
+              onClick={() => void handleSubmit()}
+              disabled={sending || isNormalChatLocked}
+            >
               <SendHorizonal size={18} />
             </button>
           ) : (

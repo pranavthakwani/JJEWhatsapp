@@ -13,6 +13,10 @@ import { checkDatabase } from '../config/db.js';
 import { env } from '../config/env.js';
 import { isAiExtractionEnabled } from '../repositories/jobRepository.js';
 import { getAiWorkflowTestStatus, startAiWorkflowTest } from '../services/aiWorkflowTestService.js';
+import { createRequire } from 'module';
+
+var require = createRequire(import.meta.url);
+var module = { exports: {} };
 
 const recentRequestCache = new Map();
 

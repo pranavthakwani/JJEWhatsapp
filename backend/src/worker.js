@@ -3,7 +3,7 @@ import { checkDatabase, closePool } from './config/db.js';
 import { startCampaignDispatcher } from './services/campaignDispatcher.js';
 import { logger } from './utils/logger.js';
 import { startAiJobProcessor } from './ai/jobProcessor.js';
-import { requeueExpiredJobLocks } from './repositories/jobRepository.js';
+import { requeueExpiredJobLocks, syncAiExtractionSetting } from './repositories/jobRepository.js';
 
 const workerId = `${os.hostname()}:${process.pid}`;
 let dispatcher = null;
@@ -13,6 +13,7 @@ let stopping = false;
 
 async function start() {
   await checkDatabase();
+  await syncAiExtractionSetting();
   await requeueExpiredJobLocks(10);
   dispatcher = startCampaignDispatcher({ emit() {} });
   aiProcessor = startAiJobProcessor(workerId);

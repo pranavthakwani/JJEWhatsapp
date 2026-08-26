@@ -7,8 +7,6 @@ import { BroadcastWorkspace } from './components/BroadcastWorkspace';
 import { AuthLoadingScreen, AuthUnavailableScreen, LoginScreen, PendingDeviceScreen } from './components/AuthScreens';
 import { AddContactDialog, StartChatDialog } from './components/ContactDialogs';
 import { DeviceManagerDialog } from './components/DeviceManagerDialog';
-import { CrmNavigation } from './components/CrmNavigation';
-import type { CrmWorkspace } from './components/CrmNavigation';
 import { WorkspaceLoading } from './components/WorkspaceLoading';
 import {
   cacheMessageMedia,
@@ -51,8 +49,7 @@ import { socket } from './lib/socket';
 import type { AuthDevice, AuthStatus, BootstrapPayload, Campaign, Contact, ContactList, Conversation, Message, StarredMessage } from './types';
 
 const LazyLeadOpsWorkspace = lazy(() => import('./components/LeadOpsWorkspace').then((module) => ({ default: module.LeadOpsWorkspace })));
-const LazyContactsWorkspace = lazy(() => import('./components/ContactsWorkspace').then((module) => ({ default: module.ContactsWorkspace })));
-const LazySystemWorkspace = lazy(() => import('./components/SystemWorkspace').then((module) => ({ default: module.SystemWorkspace })));
+type AppWorkspace = 'whatsapp' | 'leadops';
 
 const DEFAULT_CAPABILITIES: AppCapabilities = {
   whatsapp: true,
@@ -203,18 +200,19 @@ function resetMobileViewportShell() {
 function mergeMessageUpdate(existing: Message, incoming: Message) {
   const existingRank = MESSAGE_STATUS_RANK[existing.status] ?? -1;
   const incomingRank = MESSAGE_STATUS_RANK[incoming.status] ?? -1;
+  const preserveExistingStatus = existing.status === 'failed'
+    || (incoming.status !== 'failed' && existingRank > incomingRank);
 
-  if (existing.status !== 'failed' && incoming.status !== 'failed' && existingRank > incomingRank) {
-    return {
-      ...incoming,
-      status: existing.status,
-      sentAt: existing.sentAt || incoming.sentAt,
-      deliveredAt: existing.deliveredAt || incoming.deliveredAt,
-      readAt: existing.readAt || incoming.readAt,
-    };
-  }
-
-  return incoming;
+  return {
+    ...existing,
+    ...incoming,
+    status: preserveExistingStatus ? existing.status : incoming.status,
+    errorMessage: incoming.errorMessage || existing.errorMessage,
+    sentAt: incoming.sentAt || existing.sentAt,
+    deliveredAt: incoming.deliveredAt || existing.deliveredAt,
+    readAt: incoming.readAt || existing.readAt,
+    failedAt: incoming.failedAt || existing.failedAt,
+  };
 }
 
 function sortMessages(items: Message[]) {
@@ -244,7 +242,7 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState('');
   const [deviceManagerOpen, setDeviceManagerOpen] = useState(false);
-  const [activeWorkspace, setActiveWorkspace] = useState<CrmWorkspace>('whatsapp');
+  const [activeWorkspace, setActiveWorkspace] = useState<AppWorkspace>('whatsapp');
   const [capabilities, setCapabilities] = useState<AppCapabilities>(DEFAULT_CAPABILITIES);
   const [devices, setDevices] = useState<AuthDevice[]>([]);
   const [devicesLoading, setDevicesLoading] = useState(false);
@@ -284,8 +282,6 @@ export default function App() {
   const messageLoadRequestRef = useRef(0);
   const isChatOpen = Boolean(activeConversation || activeContactListId);
   const canUseApp = authStatus?.canUseApp === true;
-  const totalUnreadCount = useMemo(() => conversations.reduce((total, conversation) => total + conversation.unreadCount, 0), [conversations]);
-
   function clearUnreadLocally(conversationId: number) {
     setConversations((current) => current.map((conversation) => (
       conversation.id === conversationId
@@ -650,9 +646,7 @@ export default function App() {
         if (cancelled) return;
         setCapabilities(nextCapabilities);
         setActiveWorkspace((current) => {
-          if (current === 'contacts' && !nextCapabilities.contacts) return 'whatsapp';
           if (current === 'leadops' && !nextCapabilities.aiExtraction) return 'whatsapp';
-          if (current === 'system' && !nextCapabilities.system) return 'whatsapp';
           return current;
         });
       })
@@ -1415,15 +1409,7 @@ export default function App() {
 
   return (
     <div className={`wa-page theme-${theme} ${themeTransitioning ? 'is-theme-transitioning' : ''}`}>
-      <div className={`crm-shell ${activeWorkspace !== 'whatsapp' ? 'crm-shell--business' : ''} ${isMobileLayout && isChatOpen && activeWorkspace === 'whatsapp' ? 'crm-shell--focused-chat' : ''}`}>
-        <CrmNavigation
-          active={activeWorkspace}
-          capabilities={capabilities}
-          theme={theme}
-          unreadCount={totalUnreadCount}
-          onNavigate={setActiveWorkspace}
-          onToggleTheme={toggleTheme}
-        />
+      <div className={`crm-shell crm-shell--single-navigation ${activeWorkspace !== 'whatsapp' ? 'crm-shell--business' : ''} ${isMobileLayout && isChatOpen && activeWorkspace === 'whatsapp' ? 'crm-shell--focused-chat' : ''}`}>
         <div className="crm-workspace">
       {activeWorkspace === 'whatsapp' && <div className={`wa-app-shell ${isChatOpen ? 'wa-app-shell--chat-open' : 'wa-app-shell--list-open'}`}>
         <ConversationList
@@ -1555,9 +1541,12 @@ export default function App() {
 
           {activeWorkspace !== 'whatsapp' && (
             <Suspense fallback={<WorkspaceLoading />}>
-              {activeWorkspace === 'contacts' && capabilities.contacts && <LazyContactsWorkspace onAddContact={() => setAddContactOpen(true)} onStartConversation={handleStartChat} />}
-              {activeWorkspace === 'leadops' && capabilities.aiExtraction && <LazyLeadOpsWorkspace onOpenConversation={(conversationId) => void openConversationFromWorkspace(conversationId)} />}
-              {activeWorkspace === 'system' && capabilities.system && <LazySystemWorkspace numbers={numbers} deviceApprovalRequired={authStatus.deviceApprovalRequired} />}
+              {activeWorkspace === 'leadops' && capabilities.aiExtraction && (
+                <LazyLeadOpsWorkspace
+                  onBack={() => setActiveWorkspace('whatsapp')}
+                  onOpenConversation={(conversationId) => void openConversationFromWorkspace(conversationId)}
+                />
+              )}
             </Suspense>
           )}
         </div>
