@@ -5,6 +5,19 @@ export function isAiExtractionEnabled() {
   return env.features.aiExtraction;
 }
 
+export async function syncAiExtractionSetting() {
+  const enabled = env.features.aiExtraction ? 'true' : 'false';
+  await query(`
+    UPDATE jje.system_settings
+    SET setting_value = @enabled, updated_at = SYSUTCDATETIME()
+    WHERE setting_key = 'ai.extraction.enabled';
+    IF @@ROWCOUNT = 0
+      INSERT jje.system_settings(setting_key, setting_value, is_secret, description)
+      VALUES('ai.extraction.enabled', @enabled, 0, 'Controlled by AI_EXTRACTION_ENABLED in the backend environment.');`, [
+    input('enabled', sql.NVarChar(sql.MAX), enabled),
+  ]);
+}
+
 export async function claimBackgroundJobs({ workerId, jobType, batchSize = 5 }) {
   const result = await executeProcedure('jje.usp_BackgroundJob_ClaimBatch', [
     input('WorkerId', sql.VarChar(100), workerId),

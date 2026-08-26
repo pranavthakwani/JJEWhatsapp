@@ -303,10 +303,13 @@ export async function updateMessageStatusByWaMessageId({ waMessageId, status, st
       UPDATE recipient SET
         status = CASE
           WHEN recipient.status IN ('optin_initial_sent','optin_followup_sent') AND @status <> 'failed' THEN recipient.status
-          ELSE @status END,
+          WHEN (CASE recipient.status WHEN 'queued' THEN 0 WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 WHEN 'failed' THEN 4 ELSE -1 END)
+             <= (CASE @status WHEN 'queued' THEN 0 WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 WHEN 'failed' THEN 4 ELSE -1 END)
+            THEN @status
+          ELSE recipient.status END,
         error_message = CASE WHEN @status = 'failed' THEN @errorMessage ELSE error_message END,
-        sent_at = CASE WHEN @status = 'sent' THEN COALESCE(sent_at, @statusAt) ELSE sent_at END,
-        delivered_at = CASE WHEN @status = 'delivered' THEN COALESCE(delivered_at, @statusAt) ELSE delivered_at END,
+        sent_at = CASE WHEN @status IN ('sent','delivered','read') THEN COALESCE(sent_at, @statusAt) ELSE sent_at END,
+        delivered_at = CASE WHEN @status IN ('delivered','read') THEN COALESCE(delivered_at, @statusAt) ELSE delivered_at END,
         read_at = CASE WHEN @status = 'read' THEN COALESCE(read_at, @statusAt) ELSE read_at END,
         failed_at = CASE WHEN @status = 'failed' THEN COALESCE(failed_at, @statusAt) ELSE failed_at END,
         updated_at = SYSUTCDATETIME()

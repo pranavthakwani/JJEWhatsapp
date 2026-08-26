@@ -6,6 +6,7 @@ import { authenticateSocket } from './services/authService.js';
 import { logger } from './utils/logger.js';
 import { checkDatabase, closePool } from './config/db.js';
 import { startOutboxRelay } from './services/outboxRelay.js';
+import { syncAiExtractionSetting } from './repositories/jobRepository.js';
 
 const io = new Server({
   cors: {
@@ -38,6 +39,7 @@ io.on('connection', (socket) => {
 
 async function start() {
   await checkDatabase();
+  await syncAiExtractionSetting();
   outboxRelay = startOutboxRelay(io);
   httpServer.listen(env.port, () => {
     logger.info(`JJEWA backend listening on port ${env.port}`);

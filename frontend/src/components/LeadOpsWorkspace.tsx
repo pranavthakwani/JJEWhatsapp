@@ -6,7 +6,7 @@ import type { LeadOpsDashboard, LeadOpsFacets, LeadOpsItem, LeadOpsPage } from '
 
 type View = 'overview' | 'inbox' | 'search';
 type Queue = 'leads' | 'offerings' | 'ignored';
-type Props = { onOpenConversation: (conversationId: number) => void };
+type Props = { onBack: () => void; onOpenConversation: (conversationId: number) => void };
 
 const EMPTY_FACETS: LeadOpsFacets = { brands: [], models: [] };
 const LEAD_STATUSES = ['open', 'matched', 'closed', 'archived'];
@@ -59,7 +59,7 @@ function QueueTable({ items, selectedId, onSelect }: { items: LeadOpsItem[]; sel
   );
 }
 
-export function LeadOpsWorkspace({ onOpenConversation }: Props) {
+export function LeadOpsWorkspace({ onBack, onOpenConversation }: Props) {
   const [view, setView] = useState<View>('overview');
   const [queue, setQueue] = useState<Queue>('leads');
   const [days, setDays] = useState(30);
@@ -133,6 +133,7 @@ export function LeadOpsWorkspace({ onOpenConversation }: Props) {
   return (
     <section className="crm-module leadops-module" aria-label="Lead intelligence">
       <header className="crm-module-header leadops-module-header">
+        <button type="button" className="crm-icon-button leadops-back-button" onClick={onBack} title="Back to chats"><ChevronLeft size={19} /></button>
         <div><span className="crm-eyebrow">Intelligence workspace</span><h1>Lead operations</h1><p>Turn incoming WhatsApp inventory traffic into structured, actionable opportunities.</p></div>
         <div className="crm-header-actions"><span className="leadops-live"><i />Extraction active</span><button type="button" className="crm-icon-button" onClick={() => void Promise.all([loadSummary(), view !== 'overview' ? loadItems(page?.page || 1) : Promise.resolve()])} title="Refresh"><RefreshCw size={17} /></button></div>
       </header>
