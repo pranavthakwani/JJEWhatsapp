@@ -180,7 +180,7 @@ export function StartChatDialog({ open, onClose, onStartChat }: StartChatDialogP
   }
 
   return (
-    <div className={`dialog-layer ${open ? 'is-open' : ''}`} aria-hidden={!open}>
+    <div className={`dialog-layer chat-sidebar-layer ${open ? 'is-open' : ''}`} aria-hidden={!open}>
       <div className="dialog-layer__backdrop" onClick={onClose} />
       <section className="contact-dialog frosted-panel" role="dialog" aria-modal="true">
         <header className="contact-dialog__header">
@@ -278,7 +278,7 @@ export function AddContactDialog({ open, onClose, onContactCreated }: AddContact
   }
 
   return (
-    <div className={`dialog-layer ${open ? 'is-open' : ''}`} aria-hidden={!open}>
+    <div className={`dialog-layer chat-sidebar-layer ${open ? 'is-open' : ''}`} aria-hidden={!open}>
       <div className="dialog-layer__backdrop" onClick={onClose} />
       <section className="contact-dialog contact-dialog--compact frosted-panel" role="dialog" aria-modal="true">
         <header className="contact-dialog__header">

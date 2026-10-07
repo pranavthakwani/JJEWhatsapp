@@ -1,4 +1,5 @@
 import { clampInteger, input, iso, parseJson, query, sql } from './sqlHelpers.js';
+import { actorUserId,actorKey } from '../agent/access.js';
 
 const ITEM_TYPES = new Set(['leads', 'offerings', 'ignored']);
 const LEAD_STATUSES = new Set(['open', 'matched', 'closed', 'archived']);
@@ -70,8 +71,8 @@ export async function getLeadOpsDashboard(days = 30) {
       (SELECT COUNT_BIG(DISTINCT message.contact_id) FROM jje.message_analysis analysis INNER JOIN jje.messages message ON message.message_id=analysis.message_id WHERE analysis.created_at>=@since) analyzed_contacts,
       (SELECT COALESCE(SUM(token_input),0) FROM jje.message_analysis WHERE created_at>=@since) token_input,
       (SELECT COALESCE(SUM(token_output),0) FROM jje.message_analysis WHERE created_at>=@since) token_output,
-      (SELECT COUNT_BIG(*) FROM jje.background_jobs WHERE job_type='message.extract' AND status='queued') queued_jobs,
-      (SELECT COUNT_BIG(*) FROM jje.background_jobs WHERE job_type='message.extract' AND status='failed') failed_jobs;
+      (SELECT COUNT_BIG(*) FROM jje.background_jobs WHERE job_type='analyze_message' AND status='queued') queued_jobs,
+      (SELECT COUNT_BIG(*) FROM jje.background_jobs WHERE job_type='analyze_message' AND status='failed') failed_jobs;
 
     ;WITH dates AS (
       SELECT CAST(@since AS date) activity_date
@@ -170,14 +171,19 @@ export async function listLeadOpsItems(options = {}) {
 
 export async function getLeadMatches(leadId, limit = 20) {
   const result = await query(`
-    DECLARE @brand nvarchar(100),@model nvarchar(160),@ram int,@storage int,@priceMin decimal(19,4),@priceMax decimal(19,4);
-    SELECT @brand=brand,@model=model,@ram=ram_gb,@storage=storage_gb,@priceMin=target_price_min,@priceMax=target_price_max FROM jje.leads WHERE lead_id=@leadId;
+    DECLARE @brand nvarchar(100),@model nvarchar(160),@ram int,@storage int,@priceMin decimal(19,4),@priceMax decimal(19,4),@quantity int,@condition varchar(30),@variant nvarchar(160),@account bigint;
+    SELECT @brand=lead.brand,@model=lead.model,@ram=lead.ram_gb,@storage=lead.storage_gb,@priceMin=lead.target_price_min,@priceMax=lead.target_price_max,
+      @quantity=COALESCE(lead.quantity_min,lead.quantity_max),@condition=lead.condition,@variant=lead.variant,@account=number.business_account_id
+      FROM jje.leads lead INNER JOIN jje.message_analysis own_analysis ON own_analysis.message_analysis_id=lead.message_analysis_id
+      INNER JOIN jje.messages own_message ON own_message.message_id=own_analysis.message_id
+      INNER JOIN jje.phone_numbers number ON number.phone_number_id=own_message.phone_number_id WHERE lead.lead_id=@leadId;
     IF @@ROWCOUNT=0 THROW 50001,'Lead not found.',1;
     SELECT TOP (@limit) offering.offering_id item_id,analysis.message_analysis_id,message.message_id,message.conversation_id,message.contact_id,
       COALESCE(contact.business_name,contact.profile_name) contact_name,contact.phone_number,contact.wa_id,
       COALESCE(message.text_body,message.caption) source_text,analysis.classification,analysis.confidence,
       offering.brand,offering.model,offering.variant,offering.ram_gb,offering.storage_gb,offering.colors_json,offering.quantity_min,offering.quantity_max,
       offering.price_min,offering.price_max,offering.condition,offering.gst_included,offering.dispatch_location,offering.status item_status,offering.created_at,
+      CASE WHEN case_record.availability_confirmed_at>DATEADD(hour,-24,SYSUTCDATETIME()) AND offering.price_min IS NOT NULL AND COALESCE(offering.quantity_max,offering.quantity_min) IS NOT NULL THEN 0 ELSE 1 END provisional,
       (CASE WHEN @brand IS NOT NULL AND LOWER(offering.brand)=LOWER(@brand) THEN 40 ELSE 0 END
        +CASE WHEN @model IS NOT NULL AND LOWER(offering.model)=LOWER(@model) THEN 30 WHEN @model IS NOT NULL AND (LOWER(offering.model) LIKE '%'+LOWER(@model)+'%' OR LOWER(@model) LIKE '%'+LOWER(offering.model)+'%') THEN 15 ELSE 0 END
        +CASE WHEN @ram IS NOT NULL AND offering.ram_gb=@ram THEN 10 ELSE 0 END
@@ -187,12 +193,23 @@ export async function getLeadMatches(leadId, limit = 20) {
     INNER JOIN jje.message_analysis analysis ON analysis.message_analysis_id=offering.message_analysis_id
     INNER JOIN jje.messages message ON message.message_id=analysis.message_id
     INNER JOIN jje.contacts contact ON contact.contact_id=message.contact_id
-    WHERE offering.status NOT IN ('sold','archived') AND (@brand IS NULL OR LOWER(offering.brand)=LOWER(@brand))
+    INNER JOIN jje.phone_numbers number ON number.phone_number_id=message.phone_number_id
+    LEFT JOIN jje.agent_cases case_record ON case_record.kind='offering' AND case_record.record_id=offering.offering_id
+    WHERE @model IS NOT NULL AND @quantity>0 AND number.business_account_id=@account
+      AND LOWER(offering.model)=LOWER(@model) AND offering.status NOT IN ('sold','archived')
+      AND (@brand IS NULL OR offering.brand IS NULL OR LOWER(offering.brand)=LOWER(@brand))
+      AND (@variant IS NULL OR offering.variant IS NULL OR LOWER(offering.variant)=LOWER(@variant))
+      AND (@ram IS NULL OR offering.ram_gb IS NULL OR offering.ram_gb=@ram)
+      AND (@storage IS NULL OR offering.storage_gb IS NULL OR offering.storage_gb=@storage)
+      AND (@condition IS NULL OR @condition='unknown' OR offering.condition IS NULL OR offering.condition='unknown' OR offering.condition=@condition)
+      AND (COALESCE(offering.quantity_max,offering.quantity_min) IS NULL OR COALESCE(offering.quantity_max,offering.quantity_min)>=@quantity)
+      AND (@priceMax IS NULL OR offering.price_min IS NULL OR offering.price_min<=@priceMax)
+      AND (case_record.case_id IS NULL OR (case_record.control='active' AND case_record.state NOT IN ('closed','cancelled') AND COALESCE(JSON_VALUE(case_record.fields_json,'$.availability'),'unverified')<>'unavailable'))
     ORDER BY match_score DESC,offering.created_at DESC;`, [input('leadId', sql.BigInt, leadId), input('limit', sql.Int, clampInteger(limit, 20, 1, 100))]);
-  return result.recordset.map((row) => ({ ...itemPage(row, 'offering'), matchScore: Number(row.match_score) }));
+  return result.recordset.map((row) => ({ ...itemPage(row, 'offering'), matchScore: Number(row.match_score),provisional:Boolean(row.provisional) }));
 }
 
-async function updateStatus(table, idColumn, id, status, allowed) {
+async function updateStatus(table, idColumn, id, status, allowed,userId=null) {
   if (!allowed.has(status)) {
     const error = new Error(`Invalid status. Allowed values: ${[...allowed].join(', ')}.`);
     error.statusCode = 400;
@@ -213,6 +230,16 @@ async function updateStatus(table, idColumn, id, status, allowed) {
       SELECT id,status,updated_at FROM @updated;
       RETURN;
     END;
+    UPDATE jje.agent_cases SET version=version+1,updated_at=SYSUTCDATETIME(),
+      state=CASE WHEN @status IN ('sold','archived','closed') THEN 'closed' ELSE state END,
+      control=CASE WHEN @status='matched' THEN 'handover' ELSE control END,
+      fields_json=CASE WHEN @status='sold' THEN JSON_MODIFY(fields_json,'$.availability','unavailable') ELSE fields_json END,
+      protected_fields_json=CASE WHEN @status='sold' AND NOT EXISTS(SELECT 1 FROM OPENJSON(protected_fields_json) WHERE value='availability') THEN JSON_MODIFY(protected_fields_json,'append $','availability') ELSE protected_fields_json END
+      WHERE kind=@entityType AND record_id=@id;
+    UPDATE a SET status='superseded',version=a.version+1,updated_at=SYSUTCDATETIME() FROM jje.agent_actions a
+      INNER JOIN jje.agent_cases c ON c.case_id=a.case_id WHERE c.kind=@entityType AND c.record_id=@id AND a.status IN('pending','approved','shadow','blocked');
+    INSERT jje.agent_reviews(case_id,user_id,actor_key,decision,snapshot_json) SELECT case_id,@user,@actor,'record_status',
+      (SELECT @status status FOR JSON PATH,WITHOUT_ARRAY_WRAPPER) FROM jje.agent_cases WHERE kind=@entityType AND record_id=@id AND @actor IS NOT NULL;
     INSERT jje.outbox_events(event_type,aggregate_type,aggregate_id,payload_json)
       VALUES('leadops.status_changed',@entityType,@id,
         (SELECT @entityType entityType,@id entityId,@status status FOR JSON PATH,WITHOUT_ARRAY_WRAPPER));
@@ -220,6 +247,7 @@ async function updateStatus(table, idColumn, id, status, allowed) {
     SELECT id,status,updated_at FROM @updated;`, [
     input('id', sql.BigInt, id), input('status', sql.VarChar(30), status),
     input('entityType', sql.VarChar(60), entityType),
+    input('user',sql.BigInt,actorUserId(userId)),input('actor',sql.VarChar(100),userId==null?null:actorKey(userId)),
   ]);
   if (!result.recordset[0]) {
     const error = new Error('Item not found.'); error.statusCode = 404; error.code = 'LEADOPS_ITEM_NOT_FOUND'; throw error;
@@ -227,5 +255,5 @@ async function updateStatus(table, idColumn, id, status, allowed) {
   return { id: Number(result.recordset[0].id), status: result.recordset[0].status, updatedAt: iso(result.recordset[0].updated_at) };
 }
 
-export const updateLeadStatus = (id, status) => updateStatus('leads', 'lead_id', id, status, LEAD_STATUSES);
-export const updateOfferingStatus = (id, status) => updateStatus('offerings', 'offering_id', id, status, OFFERING_STATUSES);
+export const updateLeadStatus = (id, status,userId) => updateStatus('leads', 'lead_id', id, status, LEAD_STATUSES,userId);
+export const updateOfferingStatus = (id, status,userId) => updateStatus('offerings', 'offering_id', id, status, OFFERING_STATUSES,userId);

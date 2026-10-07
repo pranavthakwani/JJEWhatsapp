@@ -5,6 +5,10 @@ import { listPendingOutboxEvents, markOutboxFailed, markOutboxPublished } from '
 import { logger } from '../utils/logger.js';
 
 async function publishEvent(io, event) {
+  if (event.eventType.startsWith('agent.') || event.eventType.startsWith('analysis.') || event.eventType.startsWith('leadops.')) {
+    io.to('agent:staff').emit('agent:updated', { event: event.eventType, id: event.aggregateId, ...event.payload });
+    return;
+  }
   if (event.aggregateType === 'message') {
     const message = await getMessageById(event.aggregateId);
     if (!message) return;

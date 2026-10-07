@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20.11" },
+  "engines": {
+    "node": ">=20.11"
+  },
   "scripts": {
     "dev": "node src/server.js",
     "start": "node src/server.js",
@@ -12,6 +14,10 @@
     "test": "node test/security.test.js",
     "test:integration": "node test/database.integration.test.js",
     "test:leadops": "node test/leadops.database.integration.test.js",
+    "test:agent": "node test/agent.test.js",
+    "test:agent:db": "node test/agent.checkpoint.integration.test.js",
+    "test:agent:state": "node test/agent.state.integration.test.js",
+    "test:agent:api": "node test/agent.api.integration.test.js",
     "auth:bootstrap-admin": "node scripts/bootstrap-admin.mjs",
     "meta:rotate-token": "node scripts/rotate-meta-access-token.mjs",
     "ai:configure": "node scripts/configure-ai.mjs",
@@ -19,12 +25,17 @@
     "db:verify": "node ../database/scripts/verify-schema.mjs"
   },
   "dependencies": {
+    "@langchain/core": "1.2.16",
+    "@langchain/langgraph": "1.4.19",
+    "@langchain/langgraph-checkpoint": "1.1.5",
+    "@langchain/openai": "1.6.2",
     "axios": "1.16.1",
     "cors": "2.8.6",
     "dotenv": "17.4.2",
     "express": "4.22.2",
     "mssql": "10.0.4",
     "socket.io": "4.8.3",
-    "xlsx": "0.18.5"
+    "xlsx": "0.18.5",
+    "zod": "4.6.5"
   }
 }

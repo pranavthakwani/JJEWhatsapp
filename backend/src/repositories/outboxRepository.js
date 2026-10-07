@@ -17,6 +17,7 @@ export async function listPendingOutboxEvents(limit = 50) {
     aggregateId: Number(row.aggregate_id),
     attemptCount: row.attempt_count,
     createdAt: row.created_at,
+    payload: JSON.parse(row.payload_json || '{}'),
   }));
 }
 

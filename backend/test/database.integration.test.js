@@ -7,6 +7,9 @@ test('inbound storage is atomic, idempotent, and leaves AI disabled', async (con
   const pool = await getPool();
   const transaction = new sql.Transaction(pool);
   await transaction.begin();
+  // This test owns its disabled-AI premise; never depend on the live deployment
+  // setting. The change is confined to the transaction and rolled back below.
+  await new sql.Request(transaction).query("UPDATE jje.system_settings SET setting_value='false' WHERE setting_key IN ('ai.extraction.enabled','agent.processing.enabled');");
   context.after(async () => {
     if (transaction._aborted !== true) {
       try { await transaction.rollback(); } catch { /* already rolled back */ }

@@ -6,6 +6,16 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 5176,
+    proxy: {
+      '/api': {
+        target: 'http://localhost:4500',
+        changeOrigin: true,
+      },
+      '/socket.io': {
+        target: 'ws://localhost:4500',
+        ws: true,
+      },
+    },
   },
   preview: {
     host: '0.0.0.0',

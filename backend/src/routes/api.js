@@ -1,10 +1,11 @@
 
 import express from 'express';
+import { randomUUID } from 'node:crypto';
 import * as repo from '../repositories/chatRepository.js';
 import { downloadMediaContent, getBusinessProfile, getMediaDownloadStream, listMessageTemplates, markMessageAsRead, sendMediaMessage, sendReactionMessage, sendTemplateMessage, sendTextMessage, uploadMedia } from '../services/metaCloudService.js';
 import { downloadStoredMedia, storeMediaBuffer } from '../services/mediaStorageService.js';
 import { parseUploadedWorkbook } from '../services/businessContactDirectory.js';
-import { handleMetaWebhook } from '../services/webhookService.js';
+import { enqueueMetaWebhook } from '../services/webhookProcessor.js';
 import { getAuthStatus, listDevices, loginUser, logoutUser, requireAppAccess, resetCurrentDevice, updateDevice } from '../services/authService.js';
 import { buildMessagePreview, normaliseRecipientWaId } from '../utils/messageFormat.js';
 import { logger } from '../utils/logger.js';
@@ -12,6 +13,8 @@ import { verifyMetaSignature } from '../security/metaSignature.js';
 import { checkDatabase } from '../config/db.js';
 import { env } from '../config/env.js';
 import { isAiExtractionEnabled } from '../repositories/jobRepository.js';
+import { createAgentRouter,requireAgentStaff } from '../agent/routes.js';
+import { sendConversationText } from '../services/conversationSendingService.js';
 import { getAiWorkflowTestStatus, startAiWorkflowTest } from '../services/aiWorkflowTestService.js';
 
 const recentRequestCache = new Map();
@@ -326,6 +329,7 @@ export function createApiRouter(io) {
       system: env.features.system,
       aiExtraction,
       aiWorkflowTest: aiExtraction && env.features.aiWorkflowTest,
+      agent: true,
     });
   });
 
@@ -340,6 +344,8 @@ export function createApiRouter(io) {
       next(error);
     }
   });
+
+  router.use('/agent', createAgentRouter());
 
   router.post('/ai/workflow-tests', async (req, res, next) => {
     try {
@@ -404,17 +410,17 @@ export function createApiRouter(io) {
     }
   });
 
-  router.patch('/leadops/leads/:leadId', async (req, res, next) => {
+  router.patch('/leadops/leads/:leadId', requireAgentStaff, async (req, res, next) => {
     try {
-      res.json(await repo.updateLeadStatus(Number(req.params.leadId), String(req.body?.status || '')));
+      res.json(await repo.updateLeadStatus(Number(req.params.leadId), String(req.body?.status || ''),req.agentActor));
     } catch (error) {
       next(error);
     }
   });
 
-  router.patch('/leadops/offerings/:offeringId', async (req, res, next) => {
+  router.patch('/leadops/offerings/:offeringId', requireAgentStaff, async (req, res, next) => {
     try {
-      res.json(await repo.updateOfferingStatus(Number(req.params.offeringId), String(req.body?.status || '')));
+      res.json(await repo.updateOfferingStatus(Number(req.params.offeringId), String(req.body?.status || ''),req.agentActor));
     } catch (error) {
       next(error);
     }
@@ -693,12 +699,21 @@ export function createApiRouter(io) {
         templateParams = [],
         replyToWaMessageId = null,
         emoji = null,
+        clientRequestId = null,
       } = req.body || {};
+
+      if (clientRequestId && (typeof clientRequestId !== 'string' || clientRequestId.length > 80)) {
+        res.status(400).json({ error: 'clientRequestId must be a string of at most 80 characters.' });
+        return;
+      }
+
+      const requestId = clientRequestId || randomUUID();
 
       const message = await withRecentRequestDedup(
         'conversation-message',
         {
           conversationId: conversation.id,
+          clientRequestId: requestId,
           type,
           text: type === 'reaction' ? emoji : text,
           caption,
@@ -709,20 +724,8 @@ export function createApiRouter(io) {
           replyToWaMessageId,
         },
         async () => {
-          const duplicateMessage = await repo.findRecentDuplicateConversationMessage({
-            conversationId: conversation.id,
-            messageType: type,
-            textBody: type === 'reaction' ? emoji : text,
-            caption,
-            mediaId,
-            templateName,
-            templateLanguage,
-            replyToWaMessageId,
-          });
-
-          if (duplicateMessage) {
-            return duplicateMessage;
-          }
+          const existingMessage = await repo.getMessageByClientRequestId(requestId);
+          if (existingMessage) return existingMessage;
 
           let sendResult;
           if (type === 'template') {
@@ -765,12 +768,7 @@ export function createApiRouter(io) {
               replyToWaMessageId,
             });
           } else {
-            sendResult = await sendTextMessage({
-              number,
-              to: conversation.contactWaId,
-              body: text,
-              replyToWaMessageId,
-            });
+            sendResult = await sendConversationText({ number, conversation, text, replyToWaMessageId });
           }
 
           const createdMessage = await repo.createConversationMessageFromSend({
@@ -793,6 +791,7 @@ export function createApiRouter(io) {
               templateName,
               templateLanguage,
               templateParams,
+              clientRequestId: requestId,
             },
           });
 
@@ -1519,8 +1518,8 @@ export function createApiRouter(io) {
         res.status(401).json({ error: 'Invalid Meta webhook signature.' });
         return;
       }
-      const result = await handleMetaWebhook(req.body, io);
-      res.json({ ok: true, ...result });
+      const event = await enqueueMetaWebhook(req.body);
+      res.json({ ok: true, queued: true, eventId: Number(event.webhook_event_id) });
     } catch (error) {
       next(error);
     }

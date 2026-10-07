@@ -29,7 +29,7 @@ function wrapMetaError(error, fallback) {
   const metaMessage = error?.response?.data?.error?.message;
   const status = error?.response?.status;
   if (metaMessage && status) {
-    return new Error(`${fallback}: ${status} ${metaMessage}`);
+    return Object.assign(new Error(`${fallback}: ${status} ${metaMessage}`), { response: { status, data: error.response.data } });
   }
 
   if (metaMessage) {

@@ -1,4 +1,4 @@
-import { BellOff, Briefcase, Check, ChevronDown, Eraser, LogOut, Megaphone, Menu, MessageCircleMore, MessageSquarePlus, Moon, Plus, RefreshCw, Search, ShieldCheck, Star, SunMedium, Trash2, UserPlus, X } from 'lucide-react';
+import { BellOff, Check, ChevronDown, Eraser, Megaphone, MessageCircleMore, MessageSquarePlus, Moon, MoreVertical, Plus, RefreshCw, Search, Star, SunMedium, Trash2, UserPlus, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent } from 'react';
 import { getChatFilterSettings, saveChatFilterSettings } from '../lib/api';
@@ -198,7 +198,7 @@ export function ConversationList({
   const [actionError, setActionError] = useState('');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerAccountsOpen, setDrawerAccountsOpen] = useState(false);
-  const [searchOpen, setSearchOpen] = useState(Boolean(search));
+  const [searchOpen, setSearchOpen] = useState(true);
   const listRef = useRef<HTMLDivElement | null>(null);
   const loadLockRef = useRef(false);
   const longPressTimerRef = useRef<number | null>(null);
@@ -242,11 +242,6 @@ export function ConversationList({
   }, [activeMemberKeySet, broadcastsEnabled, chatFilter, contactLists, search]);
   const visibleChatCount = filteredConversations.length + filteredContactLists.length;
   const selectedNumber = numbers.find((number) => number.id === selectedPhoneNumberId) || null;
-  const selectedNumberWithProfile = selectedNumber as BusinessNumberWithProfile | null;
-  const selectedNumberProfileUrl = selectedNumberWithProfile?.profilePictureUrl
-    || selectedNumberWithProfile?.profilePicture
-    || selectedNumberWithProfile?.avatarUrl
-    || null;
   const selectedNumberLabel = selectedNumber?.displayName || businessLabel();
   const filterTargets = useMemo(() => [
     ...conversations.map((conversation) => ({
@@ -588,24 +583,8 @@ export function ConversationList({
 
       <div className="sidebar__panel">
         <header className="sidebar__toolbar sidebar__toolbar--home">
-          <button
-            type="button"
-            className="toolbar-icon-button sidebar__drawer-trigger"
-            onClick={() => setDrawerOpen(true)}
-            title="Open menu"
-          >
-            <Menu size={22} />
-          </button>
-          <strong className="sidebar__home-title">Jay Jalaram Enterprise</strong>
+          <strong className="sidebar__home-title">Chats</strong>
           <div className="sidebar__toolbar-actions">
-            <button
-              type="button"
-              className={`toolbar-icon-button ${searchOpen ? 'is-active' : ''}`}
-              onClick={() => setSearchOpen((current) => !current)}
-              title="Search chats"
-            >
-              <Search size={18} />
-            </button>
             <button
               type="button"
               className="toolbar-icon-button"
@@ -614,46 +593,61 @@ export function ConversationList({
             >
               <RefreshCw size={18} />
             </button>
+            <button
+              type="button"
+              className="toolbar-icon-button sidebar__new-chat"
+              onClick={onStartChat}
+              title="New chat"
+            >
+              <MessageSquarePlus size={20} />
+            </button>
+            <button
+              type="button"
+              className={`toolbar-icon-button ${drawerOpen ? 'is-active' : ''}`}
+              onClick={() => setDrawerOpen((current) => !current)}
+              title="Chat menu"
+              aria-expanded={drawerOpen}
+            >
+              <MoreVertical size={20} />
+            </button>
           </div>
         </header>
 
-        <div className={`app-drawer ${drawerOpen ? 'is-open' : ''}`} aria-hidden={!drawerOpen}>
+        <div className={`app-drawer chat-menu-layer ${drawerOpen ? 'is-open' : ''}`} aria-hidden={!drawerOpen}>
           <div className="app-drawer__backdrop" onClick={() => setDrawerOpen(false)} />
-          <section className="app-drawer__panel" role="dialog" aria-modal="true" aria-label="JJE menu">
-            <header className="app-drawer__profile">
-              <button
-                type="button"
-                className="app-drawer__theme-button"
-                onClick={onToggleTheme}
-                title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-              >
-                {theme === 'dark' ? <SunMedium size={29} /> : <Moon size={29} />}
+          <section className="app-drawer__panel chat-menu-popover" role="menu" aria-label="Chat menu">
+            <nav className="app-drawer__actions" aria-label="Chat actions">
+              <button type="button" role="menuitem" onClick={() => runDrawerAction(onOpenStarred)}>
+                <Star size={19} />
+                <span>Starred messages</span>
               </button>
+              {broadcastsEnabled && <button type="button" role="menuitem" onClick={() => runDrawerAction(onComposeCampaign)}>
+                <Megaphone size={19} />
+                <span>New broadcast</span>
+              </button>}
+              <button type="button" role="menuitem" onClick={() => runDrawerAction(onStartChat)}>
+                <MessageSquarePlus size={19} />
+                <span>Start new chat</span>
+              </button>
+              {contactsEnabled && <button type="button" role="menuitem" onClick={() => runDrawerAction(onAddContact)}>
+                <UserPlus size={19} />
+                <span>New contact</span>
+              </button>}
+              <button type="button" role="menuitem" onClick={() => runDrawerAction(onRefresh)}>
+                <RefreshCw size={19} />
+                <span>Refresh chats</span>
+              </button>
+            </nav>
 
-              <div className="app-drawer__avatar" aria-label="Jay Jalaram Enterprise profile">
-                {selectedNumberProfileUrl ? (
-                  <img src={selectedNumberProfileUrl} alt="JJE" />
-                ) : (
-                  <span>JJE</span>
-                )}
-              </div>
-
-              <div className="app-drawer__profile-copy">
-                <strong>{selectedNumberLabel}</strong>
-                <span>{selectedNumber?.phoneNumber || 'Select number'}</span>
-              </div>
-
+            {numbers.length > 1 && <>
               <button
                 type="button"
-                className={`app-drawer__account-toggle ${drawerAccountsOpen ? 'is-open' : ''}`}
+                className={`chat-menu-account-toggle ${drawerAccountsOpen ? 'is-open' : ''}`}
                 onClick={() => setDrawerAccountsOpen((current) => !current)}
-                title="Change account"
               >
-                <ChevronDown size={25} />
+                <span>{selectedNumberLabel}</span>
+                <ChevronDown size={18} />
               </button>
-            </header>
-
-            {(drawerAccountsOpen || numbers.length > 1) && (
               <div className="app-drawer__accounts" aria-label="Business accounts">
                 {numbers.map((number) => (
                 <button
@@ -676,43 +670,12 @@ export function ConversationList({
                 </button>
                 ))}
               </div>
-            )}
-
-            <nav className="app-drawer__actions" aria-label="App actions">
-              {leadOpsEnabled && <button type="button" onClick={() => runDrawerAction(onOpenLeadOps)}>
-                <Briefcase size={21} />
-                <span>Lead operations</span>
-              </button>}
-              <button type="button" onClick={() => runDrawerAction(onOpenStarred)}>
-                <Star size={21} />
-                <span>Starred messages</span>
-              </button>
-              {broadcastsEnabled && <button type="button" onClick={() => runDrawerAction(onComposeCampaign)}>
-                <Megaphone size={21} />
-                <span>New broadcast</span>
-              </button>}
-              <button type="button" onClick={() => runDrawerAction(onStartChat)}>
-                <MessageSquarePlus size={21} />
-                <span>Start chat</span>
-              </button>
-              {contactsEnabled && <button type="button" onClick={() => runDrawerAction(onAddContact)}>
-                <UserPlus size={21} />
-                <span>Add contact</span>
-              </button>}
-              <button type="button" onClick={() => runDrawerAction(onOpenDevices)}>
-                <ShieldCheck size={21} />
-                <span>Devices</span>
-              </button>
-              <button type="button" onClick={() => runDrawerAction(onResetDevice)}>
-                <LogOut size={21} />
-                <span>Reset device</span>
-              </button>
-            </nav>
+            </>}
           </section>
         </div>
 
         {searchOpen && (
-          <label className="searchbox">
+          <label className="searchbox" aria-label="Search chats">
             <Search size={16} />
             <input
               value={search}
@@ -749,28 +712,6 @@ export function ConversationList({
           >
             Favourites {favoriteKeys.length || ''}
           </button>
-          {customFilters.map((filter) => (
-            <button
-              key={filter.id}
-              type="button"
-              className={`sidebar-filter-pill ${chatFilter === `custom:${filter.id}` ? 'is-active' : ''}`}
-              onClick={() => {
-                if (shouldSkipFilterClick(filter.id)) return;
-                setChatFilter(`custom:${filter.id}`);
-              }}
-              onPointerDown={(event) => handleFilterPressStart(event, filter)}
-              onPointerUp={handleFilterPressEnd}
-              onPointerCancel={handleFilterPressEnd}
-              onPointerLeave={handleFilterPressEnd}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                openFilterEditor(filter);
-              }}
-              title="Long press or right-click to edit"
-            >
-              {filter.name}
-            </button>
-          ))}
           <button
             type="button"
             className="sidebar-filter-pill sidebar-filter-pill--icon"
@@ -948,7 +889,7 @@ export function ConversationList({
         </section>
       </div>
 
-      <div className={`dialog-layer filter-editor-layer ${filterEditorOpen ? 'is-open' : ''}`} aria-hidden={!filterEditorOpen}>
+      <div className={`dialog-layer filter-editor-layer chat-sidebar-layer ${filterEditorOpen ? 'is-open' : ''}`} aria-hidden={!filterEditorOpen}>
         <div className="dialog-layer__backdrop" onClick={closeFilterEditor} />
         <section className="filter-editor-dialog frosted-panel" role="dialog" aria-modal="true">
           <header className="filter-editor-dialog__header">
@@ -978,6 +919,11 @@ export function ConversationList({
             </div>
 
             {filterError && <div className="form-error">{filterError}</div>}
+
+            <div className="filter-editor-list-label">
+              <span>Chats</span>
+              <small>Select the conversations included in this filter</small>
+            </div>
 
             <div className="filter-editor-list">
               {filterTargets.map((target) => {

@@ -1,4 +1,4 @@
-import { Check, Forward, Star, X } from 'lucide-react';
+import { Briefcase, Check, Forward, Megaphone, MessageCircleMore, Moon, ShieldCheck, Star, SunMedium, X } from 'lucide-react';
 import { lazy, Suspense, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { CampaignComposer } from './components/CampaignComposer';
 import { ChatWindow } from './components/ChatWindow';
@@ -71,6 +71,18 @@ const LOCAL_MEDIA_LABELS: Record<string, string> = {
   video: '[Video]',
   audio: '[Audio]',
 };
+
+function createClientRequestId() {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function requestErrorMessage(error: unknown, fallback = 'Send failed') {
+  const response = (error as { response?: { data?: { error?: string; message?: string; correlationId?: string } } })?.response?.data;
+  const statement = response?.error || response?.message;
+  if (statement) return response?.correlationId ? `${statement} (reference ${response.correlationId})` : statement;
+  return error instanceof Error ? error.message : fallback;
+}
 
 function upsertConversation(items: Conversation[], incoming: Conversation) {
   const next = [incoming, ...items.filter((item) => item.id !== incoming.id)];
@@ -646,7 +658,7 @@ export default function App() {
         if (cancelled) return;
         setCapabilities(nextCapabilities);
         setActiveWorkspace((current) => {
-          if (current === 'leadops' && !nextCapabilities.aiExtraction) return 'whatsapp';
+          if (current === 'leadops' && !nextCapabilities.aiExtraction && !nextCapabilities.agent) return 'whatsapp';
           return current;
         });
       })
@@ -715,9 +727,12 @@ export default function App() {
       if (isActiveConversationMessage) {
         setMessages((current) => {
           if (current.some((item) => item.id === message.id)) return current;
-          const withoutReplacedReaction = message.messageType === 'reaction'
-            ? removeReplacedReaction(current, message.parentWaMessageId, message.direction, message.id)
+          const withoutMatchingOptimistic = message.direction === 'outbound' && message.clientRequestId
+            ? current.filter((item) => item.clientRequestId !== message.clientRequestId)
             : current;
+          const withoutReplacedReaction = message.messageType === 'reaction'
+            ? removeReplacedReaction(withoutMatchingOptimistic, message.parentWaMessageId, message.direction, message.id)
+            : withoutMatchingOptimistic;
           const withoutOptimisticMedia = message.direction === 'outbound' && ['image', 'video', 'audio', 'document'].includes(message.messageType)
             ? withoutReplacedReaction.filter((item) => !(
               item.id < 0
@@ -749,6 +764,7 @@ export default function App() {
       setMessages((current) => {
         const existingIndex = current.findIndex((item) => (
           item.id === message.id
+          || Boolean(item.clientRequestId && message.clientRequestId && item.clientRequestId === message.clientRequestId)
           || Boolean(item.waMessageId && message.waMessageId && item.waMessageId === message.waMessageId)
         ));
 
@@ -868,6 +884,7 @@ export default function App() {
   async function handleSendText(text: string, replyToWaMessageId?: string | null) {
     if (!activeConversation) return;
     const optimisticId = optimisticMessageIdRef.current--;
+    const clientRequestId = createClientRequestId();
     const nowIso = new Date().toISOString();
     const optimisticMessage: Message = {
       id: optimisticId,
@@ -877,6 +894,7 @@ export default function App() {
       direction: 'outbound',
       messageType: 'text',
       waMessageId: `local-${Math.abs(optimisticId)}`,
+      clientRequestId,
       parentWaMessageId: null,
       textBody: text,
       caption: null,
@@ -910,13 +928,23 @@ export default function App() {
     setMessages((current) => [...current, optimisticMessage]);
     setConversations((current) => upsertConversation(current, optimisticConversation));
     setActiveConversation(optimisticConversation);
-    setSending(true);
     try {
-      const sentMessage = await sendConversationMessage(activeConversation.id, {
-        type: 'text',
-        text,
-        replyToWaMessageId: replyToWaMessageId || null,
-      });
+      let sentMessage: Message | null = null;
+      let lastError: unknown = null;
+      for (let attempt = 0; attempt < 8 && !sentMessage; attempt += 1) {
+        try {
+          sentMessage = await sendConversationMessage(activeConversation.id, {
+            type: 'text', text, replyToWaMessageId: replyToWaMessageId || null, clientRequestId,
+          });
+        } catch (error) {
+          lastError = error;
+          const status = (error as { response?: { status?: number } })?.response?.status;
+          const retryable = !status || status === 429 || status === 502 || status === 503 || status === 504;
+          if (!retryable || attempt === 7) throw error;
+          await new Promise((resolve) => window.setTimeout(resolve, Math.min(8000, 400 * (2 ** attempt))));
+        }
+      }
+      if (!sentMessage) throw lastError || new Error('Send failed');
       setMessages((current) => {
         const withoutOptimistic = current.filter((item) => item.id !== optimisticId);
         if (withoutOptimistic.some((item) => item.id === sentMessage.id)) {
@@ -931,14 +959,12 @@ export default function App() {
           ? {
               ...item,
               status: 'failed',
-              errorMessage: error instanceof Error ? error.message : 'Send failed',
+              errorMessage: requestErrorMessage(error),
               failedAt: new Date().toISOString(),
             }
           : item
       )));
       throw error;
-    } finally {
-      setSending(false);
     }
   }
 
@@ -1409,6 +1435,28 @@ export default function App() {
 
   return (
     <div className={`wa-page theme-${theme} ${themeTransitioning ? 'is-theme-transitioning' : ''}`}>
+      <header className="desktop-brandbar">
+        <MessageCircleMore size={19} />
+        <strong>Jay Jalaram Enterprise</strong>
+      </header>
+      <div className="desktop-app-frame">
+        <nav className="desktop-icon-rail" aria-label="Primary navigation">
+          <button type="button" className={activeWorkspace === 'whatsapp' ? 'is-active' : ''} onClick={() => setActiveWorkspace('whatsapp')} data-label="Chats" aria-label="Chats">
+            <MessageCircleMore size={22} />
+          </button>
+          {(capabilities.aiExtraction || capabilities.agent) && (
+            <button type="button" className={activeWorkspace === 'leadops' ? 'is-active' : ''} onClick={() => setActiveWorkspace('leadops')} data-label="Lead operations" aria-label="Lead operations">
+              <Briefcase size={22} />
+            </button>
+          )}
+          <span className="desktop-icon-rail__spacer" />
+          <button type="button" onClick={() => setDeviceManagerOpen(true)} data-label="Devices" aria-label="Devices">
+            <ShieldCheck size={22} />
+          </button>
+          <button type="button" onClick={toggleTheme} data-label={theme === 'dark' ? 'Light theme' : 'Dark theme'} aria-label="Toggle theme">
+            {theme === 'dark' ? <SunMedium size={22} /> : <Moon size={22} />}
+          </button>
+        </nav>
       <div className={`crm-shell crm-shell--single-navigation ${activeWorkspace !== 'whatsapp' ? 'crm-shell--business' : ''} ${isMobileLayout && isChatOpen && activeWorkspace === 'whatsapp' ? 'crm-shell--focused-chat' : ''}`}>
         <div className="crm-workspace">
       {activeWorkspace === 'whatsapp' && <div className={`wa-app-shell ${isChatOpen ? 'wa-app-shell--chat-open' : 'wa-app-shell--list-open'}`}>
@@ -1447,7 +1495,7 @@ export default function App() {
           }}
           onOpenStarred={() => void openStarredMessages()}
           onOpenDevices={() => setDeviceManagerOpen(true)}
-          leadOpsEnabled={capabilities.aiExtraction}
+          leadOpsEnabled={Boolean(capabilities.aiExtraction || capabilities.agent)}
           broadcastsEnabled={capabilities.broadcasts}
           contactsEnabled={capabilities.contacts}
           onOpenLeadOps={() => setActiveWorkspace('leadops')}
@@ -1484,6 +1532,8 @@ export default function App() {
             />
           ) : (
             <ChatWindow
+              agentEnabled={capabilities.agent}
+              onOpenAgent={() => setActiveWorkspace('leadops')}
               theme={theme}
               conversation={activeConversation}
               messages={messages}
@@ -1534,6 +1584,8 @@ export default function App() {
                     : [...current, activeConversation.id]
                 ));
               }}
+              onClearConversation={handleClearConversation}
+              onDeleteConversation={handleDeleteConversation}
             />
           )}
         </main>
@@ -1541,7 +1593,7 @@ export default function App() {
 
           {activeWorkspace !== 'whatsapp' && (
             <Suspense fallback={<WorkspaceLoading />}>
-              {activeWorkspace === 'leadops' && capabilities.aiExtraction && (
+              {activeWorkspace === 'leadops' && (capabilities.aiExtraction || capabilities.agent) && (
                 <LazyLeadOpsWorkspace
                   onBack={() => setActiveWorkspace('whatsapp')}
                   onOpenConversation={(conversationId) => void openConversationFromWorkspace(conversationId)}
@@ -1550,6 +1602,7 @@ export default function App() {
             </Suspense>
           )}
         </div>
+      </div>
       </div>
 
       <CampaignComposer
@@ -1589,7 +1642,7 @@ export default function App() {
         onUpdateStatus={(deviceId, status) => void handleUpdateDeviceStatus(deviceId, status)}
       />
 
-      <div className={`bottom-sheet starred-sheet ${starredOpen ? 'is-open' : ''}`} aria-hidden={!starredOpen}>
+      <div className={`bottom-sheet starred-sheet chat-sidebar-layer ${starredOpen ? 'is-open' : ''}`} aria-hidden={!starredOpen}>
         <div className="bottom-sheet__backdrop" onClick={() => setStarredOpen(false)} />
         <section className="bottom-sheet__panel frosted-panel" role="dialog" aria-modal="true">
           <header className="bottom-sheet__header">

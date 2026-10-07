@@ -7,6 +7,9 @@ import { logger } from './utils/logger.js';
 import { checkDatabase, closePool } from './config/db.js';
 import { startOutboxRelay } from './services/outboxRelay.js';
 import { syncAiExtractionSetting } from './repositories/jobRepository.js';
+import { startWebhookProcessor } from './services/webhookProcessor.js';
+import { syncAgentSetting } from './agent/repository.js';
+import { canReviewAgent } from './agent/access.js';
 
 const io = new Server({
   cors: {
@@ -19,6 +22,7 @@ const app = createApp(io);
 const httpServer = http.createServer(app);
 io.attach(httpServer);
 let outboxRelay = null;
+let webhookProcessor = null;
 
 io.use(async (socket, next) => {
   try {
@@ -30,6 +34,7 @@ io.use(async (socket, next) => {
 });
 
 io.on('connection', (socket) => {
+  if (canReviewAgent(socket.auth)) socket.join('agent:staff');
   logger.info('Socket connected', { socketId: socket.id });
 
   socket.on('disconnect', () => {
@@ -38,9 +43,15 @@ io.on('connection', (socket) => {
 });
 
 async function start() {
-  await checkDatabase();
-  await syncAiExtractionSetting();
+  try {
+    await checkDatabase();
+    await syncAiExtractionSetting();
+    await syncAgentSetting();
+  } catch (error) {
+    logger.warn('Database unavailable during startup; API will stay online and reconnect automatically', { message: error.message });
+  }
   outboxRelay = startOutboxRelay(io);
+  webhookProcessor = startWebhookProcessor(io);
   httpServer.listen(env.port, () => {
     logger.info(`JJEWA backend listening on port ${env.port}`);
   });
@@ -51,6 +62,7 @@ async function shutdown(signal) {
   if (stopping) return;
   stopping = true;
   if (outboxRelay) clearInterval(outboxRelay);
+  if (webhookProcessor) clearInterval(webhookProcessor);
   logger.info('Graceful shutdown started', { signal });
   await new Promise((resolve) => httpServer.close(resolve));
   await closePool();

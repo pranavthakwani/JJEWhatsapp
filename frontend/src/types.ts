@@ -107,6 +107,7 @@ export type Message = {
   direction: 'inbound' | 'outbound' | 'system';
   messageType: string;
   waMessageId: string | null;
+  clientRequestId?: string | null;
   parentWaMessageId: string | null;
   textBody: string | null;
   caption: string | null;
@@ -250,6 +251,7 @@ export type LeadOpsItem = {
   status: string;
   createdAt: string;
   matchScore?: number;
+  provisional?: boolean;
 };
 
 export type LeadOpsDashboard = {
