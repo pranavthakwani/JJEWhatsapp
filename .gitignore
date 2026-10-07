@@ -2,8 +2,6 @@
 node_modules/
 dist/
 logs/
-.env
-.env.local
 
 backend/.env
 backend/node_modules/
@@ -16,3 +14,6 @@ frontend/node_modules/
 /data/legacy-supabase-snapshot/
 /.pnpm-store/
 config.bat
+
+# Unwanted assets introduced by the suspicious remote update
+/backend/src/ai/public/fonts/
