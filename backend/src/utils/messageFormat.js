@@ -32,19 +32,35 @@ export function buildMessagePreview(message) {
 }
 
 export function deriveMessageType(message) {
-  const keys = ['text', 'image', 'document', 'video', 'audio', 'sticker', 'reaction', 'button', 'interactive'];
+  const keys = ['text', 'image', 'document', 'video', 'audio', 'sticker', 'reaction', 'button', 'interactive', 'location', 'contacts', 'order', 'system', 'unsupported'];
   return keys.find((key) => message[key]) || message.type || 'unknown';
 }
 
 export function extractInboundMessageParts(message) {
   const messageType = deriveMessageType(message);
-  const textBody =
+  const extractedText =
     message.text?.body ||
     message.button?.text ||
     message.interactive?.button_reply?.title ||
     message.interactive?.list_reply?.title ||
-    message.reaction?.emoji ||
-    null;
+    message.reaction?.emoji || null;
+
+  const fallbackText = messageType === 'location'
+    ? [message.location?.name, message.location?.address, message.location?.latitude && message.location?.longitude
+      ? `https://maps.google.com/?q=${message.location.latitude},${message.location.longitude}` : null].filter(Boolean).join('\n')
+    : messageType === 'contacts'
+      ? `[Contact: ${message.contacts?.[0]?.name?.formatted_name || 'shared contact'}]`
+      : messageType === 'order'
+        ? '[WhatsApp order]'
+        : messageType === 'system'
+          ? `[System message: ${message.system?.body || message.system?.type || 'update'}]`
+          : messageType === 'unsupported'
+            ? '[Unsupported WhatsApp message]'
+            : messageType === 'text'
+              ? '[Empty text message]'
+              : `[${messageType || 'unknown'} message]`;
+
+  const textBody = extractedText || fallbackText;
 
   const mediaNode = message[messageType] || {};
 

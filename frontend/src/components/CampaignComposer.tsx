@@ -282,7 +282,7 @@ export function CampaignComposer({
   }
 
   return (
-    <div className={`campaign-drawer ${open ? 'is-open' : ''}`}>
+    <div className={`campaign-drawer chat-sidebar-layer ${open ? 'is-open' : ''}`}>
       <div className="campaign-drawer__panel campaign-drawer__panel--simple">
         <header className="campaign-drawer__header">
           <div>

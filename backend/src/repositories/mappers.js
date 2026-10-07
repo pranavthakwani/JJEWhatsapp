@@ -80,6 +80,7 @@ export function mapMessage(row) {
     direction: row.direction,
     messageType: row.message_type,
     waMessageId: row.provider_message_id,
+    clientRequestId: row.client_request_id || null,
     parentWaMessageId: row.parent_provider_message_id,
     textBody: row.text_body,
     caption: row.caption,

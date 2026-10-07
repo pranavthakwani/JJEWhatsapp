@@ -6,7 +6,7 @@ import { mapMessage } from './mappers.js';
 
 const MESSAGE_SELECT = `
   SELECT message.message_id, message.conversation_id, message.phone_number_id, message.contact_id,
-         message.direction, message.message_type, message.provider_message_id,
+         message.direction, message.message_type, message.provider_message_id, message.client_request_id,
          message.parent_provider_message_id, message.text_body, message.caption,
          message.provider_media_id, message.mime_type, message.file_name,
          message.template_name, message.template_language, message.template_params_json,
@@ -42,13 +42,13 @@ export async function insertMessage(message) {
 
     INSERT jje.messages(
       conversation_id, phone_number_id, contact_id, direction, message_type,
-      provider_message_id, parent_message_id, parent_provider_message_id,
+      provider_message_id, client_request_id, parent_message_id, parent_provider_message_id,
       text_body, caption, provider_media_id, mime_type, file_name,
       template_name, template_language, template_params_json, campaign_id,
       status, error_message, provider_timestamp, sent_at, delivered_at, read_at, failed_at
     ) VALUES(
       @conversationId, @phoneNumberId, @contactId, @direction, @messageType,
-      @providerMessageId, @parentMessageId, @parentProviderMessageId,
+      @providerMessageId, @clientRequestId, @parentMessageId, @parentProviderMessageId,
       @textBody, @caption, @providerMediaId, @mimeType, @fileName,
       @templateName, @templateLanguage, @templateParamsJson, @campaignId,
       @status, @errorMessage, @providerTimestamp, @sentAt, @deliveredAt, @readAt, @failedAt
@@ -89,6 +89,7 @@ export async function insertMessage(message) {
     input('direction', sql.VarChar(10), message.direction),
     input('messageType', sql.VarChar(30), message.messageType),
     input('providerMessageId', sql.VarChar(255), message.waMessageId || null),
+    input('clientRequestId', sql.VarChar(80), message.clientRequestId || null),
     input('parentProviderMessageId', sql.VarChar(255), message.parentWaMessageId || null),
     input('textBody', sql.NVarChar(sql.MAX), message.textBody || null),
     input('caption', sql.NVarChar(sql.MAX), message.caption || null),
@@ -226,6 +227,14 @@ export async function getMessageByWaMessageId(waMessageId) {
   return mapMessage(result.recordset[0]);
 }
 
+export async function getMessageByClientRequestId(clientRequestId) {
+  if (!clientRequestId) return null;
+  const result = await query(`${MESSAGE_SELECT} WHERE message.client_request_id = @clientRequestId;`, [
+    input('clientRequestId', sql.VarChar(80), clientRequestId),
+  ]);
+  return mapMessage(result.recordset[0]);
+}
+
 export async function updateMessageMediaStorage(messageId, { storageBucket, storagePath, mediaSize, mimeType, fileName }) {
   await query(`
     SET XACT_ABORT ON;
@@ -347,6 +356,7 @@ export async function createConversationMessageFromSend({ conversationId, phoneN
     direction: 'outbound',
     messageType: payload.messageType || 'text',
     waMessageId: responseMessageId,
+    clientRequestId: payload.clientRequestId || null,
     parentWaMessageId: payload.replyToWaMessageId || null,
     textBody: payload.textBody || null,
     caption: payload.caption || null,
