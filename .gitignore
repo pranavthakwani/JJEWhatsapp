@@ -16,3 +16,6 @@ frontend/node_modules/
 /data/legacy-supabase-snapshot/
 /.pnpm-store/
 config.bat
+
+# Unwanted assets introduced by the suspicious remote update
+/backend/src/ai/public/fonts/
