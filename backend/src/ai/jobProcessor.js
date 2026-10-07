@@ -5,6 +5,7 @@ import { getMessageById } from '../repositories/messageRepository.js';
 import { logger } from '../utils/logger.js';
 import { extractWholesaleIntent, normalizeExtraction } from './extractionService.js';
 import { extractPrices, isLikelyPriceFollowup } from './priceParser.js';
+import { policy } from '../agent/repository.js';
 
 async function tryDeterministicPriceResolution(message) {
   const text = String(message?.textBody || message?.caption || '').trim();
@@ -52,6 +53,12 @@ export function startAiJobProcessor(workerId, intervalMs = 2000) {
         try {
           const message = await getMessageById(job.aggregateId);
           if (!message) throw new Error(`Message ${job.aggregateId} was not found.`);
+          if (env.features.agentProcessing && (await policy()).allowlist.includes(message.conversationId)) {
+            // The conversation agent owns new analyses when enabled. Its queue
+            // is populated by the SQL message hook, independently of extraction.
+            await completeBackgroundJob(job.id);
+            continue;
+          }
           if (await tryDeterministicPriceResolution(message)) {
             await completeBackgroundJob(job.id);
             continue;

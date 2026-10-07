@@ -79,8 +79,9 @@ export async function saveMessageAnalysis({ messageId, extraction, model, prompt
     END
     ELSE
     BEGIN
-      DELETE FROM jje.leads WHERE message_analysis_id = @analysisId;
-      DELETE FROM jje.offerings WHERE message_analysis_id = @analysisId;
+      -- Preserve stable business IDs and staff-edited records during re-analysis.
+      INSERT jje.analysis_revisions(message_analysis_id,extracted_json,classification,model_name,prompt_version)
+        SELECT message_analysis_id,extracted_json,classification,model_name,prompt_version FROM jje.message_analysis WHERE message_analysis_id=@analysisId;
       UPDATE jje.message_analysis SET classification = @classification, confidence = @confidence,
         model_name = @model, prompt_version = @promptVersion, extracted_json = @extractedJson,
         status = 'completed', error_message = NULL, token_input = @tokenInput,
@@ -102,7 +103,8 @@ export async function saveMessageAnalysis({ messageId, extraction, model, prompt
         colors_json nvarchar(max) '$.colors' AS JSON, quantity_min int '$.quantityMin',
         quantity_max int '$.quantityMax', price_min decimal(19,4) '$.priceMin',
         price_max decimal(19,4) '$.priceMax', dispatch_location nvarchar(240) '$.dispatchLocation'
-      ) source;
+      ) source
+      WHERE NOT EXISTS(SELECT 1 FROM jje.leads existing WHERE existing.message_analysis_id=@analysisId AND existing.item_index=source.item_index);
 
     IF @classification = 'offering'
       INSERT jje.offerings(message_analysis_id, item_index, brand, model, variant, ram_gb, storage_gb,
@@ -119,7 +121,8 @@ export async function saveMessageAnalysis({ messageId, extraction, model, prompt
         colors_json nvarchar(max) '$.colors' AS JSON, quantity_min int '$.quantityMin',
         quantity_max int '$.quantityMax', price_min decimal(19,4) '$.priceMin',
         price_max decimal(19,4) '$.priceMax', dispatch_location nvarchar(240) '$.dispatchLocation'
-      ) source;
+      ) source
+      WHERE NOT EXISTS(SELECT 1 FROM jje.offerings existing WHERE existing.message_analysis_id=@analysisId AND existing.item_index=source.item_index);
 
     DECLARE @eventPayload nvarchar(max) = (SELECT @analysisId analysisId, @messageId messageId,
       @classification classification FOR JSON PATH, WITHOUT_ARRAY_WRAPPER);

@@ -132,14 +132,18 @@ WhatsApp, Contacts, optional Lead Intelligence, and System workspaces. Lead Inte
 operational KPIs, activity trends, a dense lead/offering/ignored inbox, market search, raw-message
 versus structured-intelligence investigation, status workflows, and scored offering matches.
 
-Contacts, System, and Lead Intelligence are lazy-loaded frontend bundles. The Lead Intelligence
-navigation item is fetched from `/api/ai/status` and is not rendered when extraction is disabled;
-WhatsApp has no runtime or bundle dependency on the AI worker.
+Contacts, System, and Lead Intelligence are lazy-loaded frontend bundles. Agent review remains
+accessible when extraction or processing is disabled so staff can inspect persisted cases and
+approvals. WhatsApp has no runtime or bundle dependency on the AI worker.
 
-There is intentionally no reply or auto-send action in LeadOps. WhatsApp remains usable when
-AI is disabled, while the extraction worker can be enabled independently later. Future reply
-automation should consume reviewed LeadOps records through a separate policy-controlled service;
-it must not be embedded in message ingestion or the LeadOps read APIs.
+The Agent review tab adds durable qualification, evidence, supplier matching and staff-approved
+clarification drafts through two SQL-checkpointed LangGraph workflows. There is no autonomous
+negotiation or unapproved sending. `AGENT_PROCESSING_ENABLED` and `AGENT_SENDING_ENABLED` are
+independent, default-off master switches. WhatsApp remains usable when AI is disabled.
+`AGENT_SHARED_ADMIN_ACCESS=true` removes account sign-in and gives everyone with app access
+admin-level agent controls. Browser-device IDs retain claim and approval history, not personal
+identity. Restrict access to trusted networks; set the flag to false for account-based roles.
+See [agent implementation and rollout](docs/agent-rollout.md) for policy, migrations, tests and pilot gates.
 
 After database connectivity is available, apply the LeadOps query indexes and validate its read models:
 

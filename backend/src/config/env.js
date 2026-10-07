@@ -87,6 +87,9 @@ export const env = {
     useEnvProxy: boolean(process.env.OPENAI_USE_ENV_PROXY, false),
   },
   features: {
+    agentSharedAdminAccess: boolean(process.env.AGENT_SHARED_ADMIN_ACCESS, true),
+    agentProcessing: boolean(process.env.AGENT_PROCESSING_ENABLED, false),
+    agentSending: boolean(process.env.AGENT_SENDING_ENABLED, false),
     contacts: boolean(process.env.FEATURE_CONTACTS_ENABLED, true),
     broadcasts: boolean(process.env.FEATURE_BROADCASTS_ENABLED, true),
     system: boolean(process.env.FEATURE_SYSTEM_ENABLED, true),
@@ -101,7 +104,7 @@ export const env = {
     sessionHours: integer(process.env.AUTH_SESSION_HOURS, 12, { min: 1, max: 168 }),
     rememberDays: integer(process.env.AUTH_REMEMBER_DAYS, 30, { min: 1, max: 365 }),
     deviceDays: integer(process.env.AUTH_DEVICE_DAYS, 365, { min: 1, max: 730 }),
-    requireUser: boolean(process.env.AUTH_REQUIRE_USER, isProduction),
+    requireUser: boolean(process.env.AGENT_SHARED_ADMIN_ACCESS, true) ? false : boolean(process.env.AUTH_REQUIRE_USER, isProduction),
     requireDeviceApproval: boolean(process.env.AUTH_DEVICE_APPROVAL_REQUIRED, true),
   },
   socketCorsOrigin,

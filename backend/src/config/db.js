@@ -2,6 +2,7 @@ import sql from 'mssql';
 import { env } from './env.js';
 
 let poolPromise = null;
+const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 function createPool() {
   return new sql.ConnectionPool({
@@ -27,11 +28,21 @@ function createPool() {
 
 export async function getPool() {
   if (!poolPromise) {
-    const pool = createPool();
-    pool.on('error', () => {
-      poolPromise = null;
-    });
-    poolPromise = pool.connect().catch((error) => {
+    poolPromise = (async () => {
+      let lastError;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const pool = createPool();
+        pool.on('error', () => { poolPromise = null; });
+        try {
+          return await pool.connect();
+        } catch (error) {
+          lastError = error;
+          await pool.close().catch(() => undefined);
+          if (attempt < 3) await wait(250 * (2 ** attempt));
+        }
+      }
+      throw lastError;
+    })().catch((error) => {
       poolPromise = null;
       throw error;
     });

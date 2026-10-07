@@ -72,7 +72,9 @@ try {
     }
 
     process.stdout.write(`Applying ${fileName}... `);
-    await pool.request().batch(migrationSql);
+    for (const batch of migrationSql.split(/^\s*GO\s*$/im).filter((text) => text.trim())) {
+      await pool.request().batch(batch);
+    }
     process.stdout.write('done\n');
   }
 

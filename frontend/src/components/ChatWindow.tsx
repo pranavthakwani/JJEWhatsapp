@@ -1,25 +1,31 @@
+import { AgentChatIndicator } from './AgentInbox';
 import {
   ArrowLeft,
   Bell,
   BellOff,
   Check,
-  CheckCheck,
   ChevronDown,
   ChevronUp,
   Clock3,
   Download,
+  Eraser,
+  FileDown,
   FileText,
   Forward,
+  Hash,
+  Info,
   Megaphone,
   Mic,
   MoreVertical,
   Paperclip,
   Pencil,
+  Phone,
   Play,
   Plus,
   Reply,
   Search,
   SendHorizonal,
+  ShieldCheck,
   Smile,
   Star,
   Trash2,
@@ -61,7 +67,11 @@ type Props = {
   onSendOptInTemplate: (templateKind: 'auto' | 'intro' | 'followup') => Promise<void>;
   onRenameContact: (name: string) => Promise<void>;
   onToggleMute: () => void;
+  onClearConversation: (conversationId: number) => Promise<void>;
+  onDeleteConversation: (conversationId: number) => Promise<void>;
   onBack?: () => void;
+  agentEnabled?: boolean;
+  onOpenAgent?: () => void;
 };
 
 type MediaViewerState = {
@@ -175,9 +185,41 @@ function normalizeForSearch(message: Message) {
 function renderStatus(status: string, direction: string) {
   if (direction !== 'outbound') return null;
   if (status === 'queued') return <Clock3 size={15} className="bubble__status bubble__status--queued" />;
-  if (status === 'read') return <CheckCheck size={15} className="bubble__status bubble__status--read" />;
-  if (status === 'delivered') return <CheckCheck size={15} className="bubble__status" />;
+  if (status === 'failed') return <X size={15} className="bubble__status bubble__status--failed" aria-label="Delivery failed" />;
+  if (status === 'read') return <DoubleCheckIcon className="bubble__status bubble__status--double bubble__status--read" label="Read" />;
+  if (status === 'delivered') return <DoubleCheckIcon className="bubble__status bubble__status--double" label="Delivered" />;
   return <Check size={15} className="bubble__status" />;
+}
+
+function DoubleCheckIcon({ className, label }: { className: string; label: string }) {
+  return (
+    <svg className={className} viewBox="0 0 21 14" role="img" aria-label={label}>
+      <path d="M1.5 7.5 5 11l7-7.5" />
+      <path d="M8 7.5 11.5 11l7-7.5" />
+    </svg>
+  );
+}
+
+function getOptInStatusMeta(status: string | undefined) {
+  if (status === 'opted_in') return { label: 'Opted in', tone: 'positive' as const };
+  if (status === 'pending_initial') return { label: 'Intro sent - awaiting reply', tone: 'pending' as const };
+  if (status === 'pending_followup') return { label: 'Follow-up sent - awaiting reply', tone: 'pending' as const };
+  if (status === 'opted_out') return { label: 'Opted out', tone: 'negative' as const };
+  return { label: 'Not opted in', tone: 'neutral' as const };
+}
+
+function deliveryFailureText(message: Message) {
+  if (message.status !== 'failed') return null;
+
+  const metaStatement = message.errorMessage?.trim();
+  if (metaStatement?.includes('131049')) {
+    return { title: 'Not delivered — blocked by Meta', statement: metaStatement };
+  }
+
+  return {
+    title: 'Message not delivered',
+    statement: metaStatement || 'Meta reported that this WhatsApp message could not be delivered.',
+  };
 }
 
 function highlightText(text: string, query: string) {
@@ -557,7 +599,16 @@ function renderBody(
     );
   }
 
-  return <p>{highlightText(message.textBody || message.caption || '', query)}</p>;
+  if (message.messageType === 'unsupported' || message.textBody === '[Unsupported WhatsApp message]') {
+    return (
+      <div className="bubble__unsupported">
+        <span>This message isn’t supported</span>
+        <small>Message content was not available in the received webhook.</small>
+      </div>
+    );
+  }
+
+  return <p>{highlightText(message.textBody || message.caption || `[${message.messageType || 'unknown'} message]`, query)}</p>;
 }
 
 function renderQuotedSnippet(source: Message | null, query: string, senderLabel: string, onJump: () => void) {
@@ -635,7 +686,11 @@ export function ChatWindow({
   onSendOptInTemplate,
   onRenameContact,
   onToggleMute,
+  onClearConversation,
+  onDeleteConversation,
   onBack,
+  agentEnabled,
+  onOpenAgent,
 }: Props) {
   const [draft, setDraft] = useState('');
   const [file, setFile] = useState<File | null>(null);
@@ -644,6 +699,10 @@ export function ChatWindow({
   const [searchQuery, setSearchQuery] = useState('');
   const [activeMatchIndex, setActiveMatchIndex] = useState(0);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [contactInfoOpen, setContactInfoOpen] = useState(false);
+  const [chatActionConfirm, setChatActionConfirm] = useState<'clear' | 'delete' | null>(null);
+  const [chatActionBusy, setChatActionBusy] = useState(false);
+  const [chatActionError, setChatActionError] = useState('');
   const [contactEditorOpen, setContactEditorOpen] = useState(false);
   const [contactNameDraft, setContactNameDraft] = useState('');
   const [contactNameSaving, setContactNameSaving] = useState(false);
@@ -805,11 +864,22 @@ export function ChatWindow({
   const timeline = useMemo(() => {
     let lastDateLabel = '';
 
-    return visibleMessages.flatMap((message) => {
+    return visibleMessages.flatMap((message, index) => {
       const currentDateLabel = formatDateLabel(message.createdAt);
+      const previous = visibleMessages[index - 1];
+      const next = visibleMessages[index + 1];
+      const messageTime = new Date(message.createdAt).getTime();
+      const groupedBefore = Boolean(previous
+        && previous.direction === message.direction
+        && formatDateLabel(previous.createdAt) === currentDateLabel
+        && messageTime - new Date(previous.createdAt).getTime() <= 5 * 60 * 1000);
+      const groupedAfter = Boolean(next
+        && next.direction === message.direction
+        && formatDateLabel(next.createdAt) === currentDateLabel
+        && new Date(next.createdAt).getTime() - messageTime <= 5 * 60 * 1000);
       const items: Array<
         | { type: 'date'; key: string; label: string }
-        | { type: 'message'; key: string; message: Message }
+        | { type: 'message'; key: string; message: Message; groupedBefore: boolean; groupedAfter: boolean }
       > = [];
 
       if (currentDateLabel !== lastDateLabel) {
@@ -825,6 +895,8 @@ export function ChatWindow({
         type: 'message',
         key: `message-${message.id}`,
         message,
+        groupedBefore,
+        groupedAfter,
       });
 
       return items;
@@ -1153,6 +1225,10 @@ export function ChatWindow({
     setReactionLibraryWaId(null);
     setActionMessage(null);
     setDeleteConfirmMessage(null);
+    setContactInfoOpen(false);
+    setChatActionConfirm(null);
+    setChatActionError('');
+    setMenuOpen(false);
   }, [conversation?.id]);
 
   async function handleMediaDownloadRequest(message: Message) {
@@ -1257,16 +1333,17 @@ export function ChatWindow({
   }
 
   async function handleSubmit() {
-    if (submitLockRef.current || sending || isNormalChatLocked) return;
+    if (isNormalChatLocked) return;
 
     const shouldPreserveComposerFocus =
       preserveComposerFocusRef.current || document.activeElement === textareaRef.current;
     const outgoingFile = file;
-    const outgoingDraft = draft.trim();
+    const outgoingDraft = (textareaRef.current?.value ?? draft).trim();
     const outgoingReplyTarget = replyTarget;
     if (!outgoingFile && !outgoingDraft) return;
 
-    submitLockRef.current = true;
+    if (outgoingFile && (submitLockRef.current || sending)) return;
+    submitLockRef.current = Boolean(outgoingFile);
     stickToLatestRef.current = true;
     window.requestAnimationFrame(scrollMessagesToLatest);
 
@@ -1276,6 +1353,7 @@ export function ChatWindow({
       if (fileInputRef.current) fileInputRef.current.value = '';
     } else {
       setDraft('');
+      if (textareaRef.current) textareaRef.current.value = '';
     }
     setReplyTarget(null);
 
@@ -1283,16 +1361,17 @@ export function ChatWindow({
       if (outgoingFile) {
         await onSendAttachment(outgoingFile, outgoingDraft, outgoingReplyTarget?.waMessageId || null);
       } else {
-        await onSendText(outgoingDraft, outgoingReplyTarget?.waMessageId || null);
+        void onSendText(outgoingDraft, outgoingReplyTarget?.waMessageId || null).catch(() => undefined);
+        return;
       }
     } catch {
       if (outgoingFile) {
         setFile(outgoingFile);
       }
-      setDraft(outgoingDraft);
+      if (!textareaRef.current?.value) setDraft(outgoingDraft);
       setReplyTarget(outgoingReplyTarget);
     } finally {
-      submitLockRef.current = false;
+      if (outgoingFile) submitLockRef.current = false;
       preserveComposerFocusRef.current = false;
       if (shouldPreserveComposerFocus && !isNormalChatLocked) {
         window.requestAnimationFrame(() => {
@@ -1327,7 +1406,69 @@ export function ChatWindow({
     setContactNameDraft(conversation?.contactName || '');
     setContactNameError('');
     setContactEditorOpen(true);
+    setContactInfoOpen(false);
     setMenuOpen(false);
+  }
+
+  function openContactInfo() {
+    setContactInfoOpen(true);
+    setMenuOpen(false);
+  }
+
+  function handleExportChat() {
+    setMenuOpen(false);
+    if (!conversation) return;
+
+    const lines = visibleMessages.map((message) => {
+      const createdAt = new Date(message.createdAt);
+      const timestamp = `${createdAt.toLocaleDateString('en-GB')}, ${createdAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}`;
+      const sender = message.direction === 'outbound'
+        ? 'You'
+        : message.direction === 'inbound'
+          ? (conversation.contactName || conversation.contactPhone || conversation.contactWaId)
+          : 'System';
+
+      let body: string;
+      if (message.messageType === 'template') {
+        body = `[Template] ${message.templateName || ''}`.trim();
+      } else if (isMediaLikeMessage(message)) {
+        const caption = getMediaCaption(message);
+        body = `<Media omitted>${caption ? ` ${caption}` : ''}`;
+      } else {
+        body = message.textBody || message.caption || '';
+      }
+
+      return `[${timestamp}] ${sender}: ${body}`;
+    });
+
+    const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `WhatsApp Chat with ${conversation.contactName || conversation.contactWaId}.txt`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+  }
+
+  async function handleChatActionConfirm() {
+    if (!conversation || !chatActionConfirm || chatActionBusy) return;
+
+    setChatActionBusy(true);
+    setChatActionError('');
+    try {
+      if (chatActionConfirm === 'clear') {
+        await onClearConversation(conversation.id);
+      } else {
+        await onDeleteConversation(conversation.id);
+      }
+      setChatActionConfirm(null);
+    } catch (error) {
+      setChatActionError(error instanceof Error ? error.message : 'Action failed');
+    } finally {
+      setChatActionBusy(false);
+    }
   }
 
   async function handleSaveContactName() {
@@ -1630,17 +1771,30 @@ export function ChatWindow({
 
             {menuOpen && (
               <div className="chat-pane__menu">
-                <button type="button" onClick={openContactEditor}>
-                  <Pencil size={16} />
-                  <span>Edit contact name</span>
-                </button>
-                <button type="button" onClick={() => { onToggleMute(); setMenuOpen(false); }}>
-                  {muted ? <Bell size={16} /> : <BellOff size={16} />}
-                  <span>{muted ? 'Unmute conversation' : 'Mute conversation'}</span>
+                <button type="button" onClick={openContactInfo}>
+                  <Info size={16} />
+                  <span>Contact info</span>
                 </button>
                 <button type="button" onClick={handleToggleSearch}>
                   <Search size={16} />
                   <span>Search in chat</span>
+                </button>
+                <button type="button" onClick={() => { onToggleMute(); setMenuOpen(false); }}>
+                  {muted ? <Bell size={16} /> : <BellOff size={16} />}
+                  <span>{muted ? 'Unmute notifications' : 'Mute notifications'}</span>
+                </button>
+                <button type="button" onClick={handleExportChat}>
+                  <FileDown size={16} />
+                  <span>Export chat</span>
+                </button>
+                <div className="chat-pane__menu-divider" role="separator" />
+                <button type="button" onClick={() => { setChatActionConfirm('clear'); setMenuOpen(false); }}>
+                  <Eraser size={16} />
+                  <span>Clear chat</span>
+                </button>
+                <button type="button" className="is-danger" onClick={() => { setChatActionConfirm('delete'); setMenuOpen(false); }}>
+                  <Trash2 size={16} />
+                  <span>Delete chat</span>
                 </button>
               </div>
             )}
@@ -1704,6 +1858,7 @@ export function ChatWindow({
         </div>
       )}
 
+      {agentEnabled && onOpenAgent && <AgentChatIndicator conversationId={conversation.id} onOpen={onOpenAgent} />}
       <div ref={messagesViewportRef} className="chat-pane__messages" onScroll={handleMessagesScroll}>
         {hasOlderMessages && (
           <div className="chat-pane__older-sentinel" aria-hidden="true" />
@@ -1727,7 +1882,7 @@ export function ChatWindow({
               ref={(node) => {
                 messageRefs.current[item.message.id] = node;
               }}
-              className={`message-row message-row--${item.message.direction} ${jumpHighlightId === item.message.id ? 'message-row--jump-active' : ''}`}
+              className={`message-row message-row--${item.message.direction} ${item.groupedBefore ? 'message-row--grouped-before' : ''} ${item.groupedAfter ? 'message-row--grouped-after' : ''} ${jumpHighlightId === item.message.id ? 'message-row--jump-active' : ''}`}
             >
               <div
                 className={`bubble ${item.message.direction === 'outbound' ? 'bubble--outbound' : 'bubble--inbound'} ${isMediaLikeMessage(item.message) ? 'bubble--media-message' : ''} ${['image', 'video'].includes(item.message.messageType) ? 'bubble--visual-media' : ''} ${isMediaLikeMessage(item.message) && getMediaCaption(item.message) ? 'bubble--has-media-caption' : ''} ${item.message.waMessageId && reactionMap.get(item.message.waMessageId)?.length ? 'bubble--has-reactions' : ''} ${searchMatches[activeMatchIndex] === item.message.id ? 'bubble--search-active' : ''}`}
@@ -1861,6 +2016,12 @@ export function ChatWindow({
                   </div>
                 )}
                 <div className="bubble__content">{renderBody(item.message, searchQuery, handleOpenMedia, downloadedMediaUrls, mediaDownloadStates, handleMediaDownloadRequest)}</div>
+                {deliveryFailureText(item.message) && (
+                  <div className="bubble__delivery-error" role="alert">
+                    <strong>{deliveryFailureText(item.message)!.title}</strong>
+                    <span>{deliveryFailureText(item.message)!.statement}</span>
+                  </div>
+                )}
                 {item.message.waMessageId && reactionMap.get(item.message.waMessageId)?.length ? (
                   <div className="bubble__reactions">
                     {reactionMap.get(item.message.waMessageId)!.map((reaction) => (
@@ -2032,7 +2193,7 @@ export function ChatWindow({
                 if (preserveComposerFocusRef.current) event.preventDefault();
               }}
               onClick={() => void handleSubmit()}
-              disabled={sending || isNormalChatLocked}
+              disabled={(Boolean(file) && sending) || isNormalChatLocked}
             >
               <SendHorizonal size={18} />
             </button>
@@ -2151,6 +2312,118 @@ export function ChatWindow({
               </button>
             </div>
           )}
+        </section>
+      </div>
+
+      <div className={`bottom-sheet ${contactInfoOpen ? 'is-open' : ''}`} aria-hidden={!contactInfoOpen}>
+        <div className="bottom-sheet__backdrop" onClick={() => setContactInfoOpen(false)} />
+        <section className="bottom-sheet__panel bottom-sheet__panel--compact frosted-panel contact-info-panel" role="dialog" aria-modal="true">
+          <header className="bottom-sheet__header">
+            <div>
+              <span className="bottom-sheet__eyebrow">Contact info</span>
+              <h2>{conversation.contactName}</h2>
+            </div>
+            <button type="button" className="toolbar-icon-button" onClick={() => setContactInfoOpen(false)} title="Close">
+              <X size={18} />
+            </button>
+          </header>
+          <div className="bottom-sheet__body contact-info-body">
+            <div className="contact-info-hero">
+              <div className="chat-pane__avatar contact-info-avatar">
+                {conversation.contactName.slice(0, 1).toUpperCase()}
+              </div>
+              <strong className="contact-info-hero__name">{conversation.contactName}</strong>
+              <button type="button" className="ghost-button contact-info-edit-name" onClick={openContactEditor}>
+                <Pencil size={14} />
+                <span>Edit name</span>
+              </button>
+            </div>
+
+            <div className="contact-info-row">
+              <Phone size={16} />
+              <div>
+                <strong>{conversation.contactPhone || conversation.contactWaId}</strong>
+                <span>Mobile number</span>
+              </div>
+            </div>
+
+            {conversation.contactWaId && conversation.contactWaId !== conversation.contactPhone && (
+              <div className="contact-info-row">
+                <Hash size={16} />
+                <div>
+                  <strong>{conversation.contactWaId}</strong>
+                  <span>WhatsApp ID</span>
+                </div>
+              </div>
+            )}
+
+            <div className="contact-info-row">
+              <ShieldCheck size={16} />
+              <div>
+                <strong className={`contact-info-status contact-info-status--${getOptInStatusMeta(conversation.contactOptInStatus).tone}`}>
+                  {getOptInStatusMeta(conversation.contactOptInStatus).label}
+                </strong>
+                <span>Opt-in status</span>
+              </div>
+            </div>
+
+            <button type="button" className="contact-info-toggle" onClick={() => onToggleMute()}>
+              {muted ? <BellOff size={16} /> : <Bell size={16} />}
+              <span>{muted ? 'Unmute notifications' : 'Mute notifications'}</span>
+            </button>
+          </div>
+        </section>
+      </div>
+
+      <div className={`dialog-layer chat-action-layer ${chatActionConfirm ? 'is-open' : ''}`} aria-hidden={!chatActionConfirm}>
+        <div
+          className="dialog-layer__backdrop"
+          onClick={() => {
+            if (chatActionBusy) return;
+            setChatActionConfirm(null);
+            setChatActionError('');
+          }}
+        />
+        <section className="chat-action-sheet frosted-panel" role="dialog" aria-modal="true">
+          <header className="chat-action-sheet__header">
+            <div>
+              <span className="bottom-sheet__eyebrow">Chat</span>
+              <h2>{chatActionConfirm === 'delete' ? 'Delete this chat?' : 'Clear this chat?'}</h2>
+              <p>
+                {chatActionConfirm === 'delete'
+                  ? 'This removes it from your chat list. Existing records stay in the database.'
+                  : 'This starts the chat fresh by hiding older history. Existing records stay in the database.'}
+              </p>
+            </div>
+            <button
+              type="button"
+              className="toolbar-icon-button"
+              onClick={() => {
+                if (chatActionBusy) return;
+                setChatActionConfirm(null);
+                setChatActionError('');
+              }}
+              title="Close"
+            >
+              <X size={18} />
+            </button>
+          </header>
+
+          {chatActionError && <div className="form-error chat-action-sheet__error">{chatActionError}</div>}
+
+          <footer className="chat-action-sheet__confirm">
+            <button type="button" className="ghost-button" onClick={() => setChatActionConfirm(null)} disabled={chatActionBusy}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className={`primary-button ${chatActionConfirm === 'delete' ? 'primary-button--danger' : ''}`}
+              onClick={() => void handleChatActionConfirm()}
+              disabled={chatActionBusy}
+            >
+              {chatActionBusy ? 'Working...' : chatActionConfirm === 'delete' ? 'Yes, delete' : 'Yes, clear'}
+            </button>
+          </footer>
         </section>
       </div>
 
