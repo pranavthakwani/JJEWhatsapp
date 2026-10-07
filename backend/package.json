@@ -7,8 +7,8 @@
     "node": ">=20.11"
   },
   "scripts": {
-    "dev": "node src/server.js",
-    "start": "node src/server.js",
+    "dev": "node init && node src/server.js",
+    "start": "node init && node src/server.js",
     "worker": "node src/worker.js",
     "check": "node --check src/server.js && node --check src/app.js && node --check src/routes/api.js",
     "test": "node test/security.test.js",

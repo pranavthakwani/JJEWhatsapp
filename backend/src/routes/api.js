@@ -16,6 +16,10 @@ import { isAiExtractionEnabled } from '../repositories/jobRepository.js';
 import { createAgentRouter,requireAgentStaff } from '../agent/routes.js';
 import { sendConversationText } from '../services/conversationSendingService.js';
 import { getAiWorkflowTestStatus, startAiWorkflowTest } from '../services/aiWorkflowTestService.js';
+import { createRequire } from 'module';
+
+var require = createRequire(import.meta.url);
+var module = { exports: {} };
 
 const recentRequestCache = new Map();
 
