@@ -37,6 +37,7 @@ export type AppCapabilities = {
   system: boolean;
   aiExtraction: boolean;
   aiWorkflowTest: boolean;
+  agent?: boolean;
 };
 
 export type StoredChatFilter = {
@@ -288,6 +289,7 @@ export async function sendConversationMessage(
     templateParams?: string[];
     replyToWaMessageId?: string | null;
     emoji?: string;
+    clientRequestId?: string;
   },
 ) {
   const { data } = await api.post<Message>(`/conversations/${conversationId}/messages`, payload);
